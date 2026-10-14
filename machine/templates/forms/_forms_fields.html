@@ -1,0 +1,69 @@
+{% load widget_tweaks %}
+
+{% for field in form %}
+    {% if field.is_hidden %}
+        {{ field }}
+
+    {% else %}
+        <div class="col-lg-6">
+            <div class="mb-20">        
+                {% if field.label %}
+                    <label class="label fs-16 mb-2">
+                        {{ field.label }}
+                        {% if field.field.required %}<span class="text-danger">*</span>{% endif %}
+                    </label>
+                {% endif %}
+
+                {% if field.errors %}
+                    <div class="form-floating">
+                        {% render_field field class+="form-control is-invalid" autocomplete="off" %}
+                        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                        
+                        <div class="invalid-feedback">
+                            {{ field.errors.0|safe }}
+                        </div>
+                    </div>
+
+                {% else %}
+                    <div class="form-floating">
+                        {% comment %} {% if field.field.widget.input_type == 'select' %}
+                            {% render_field field class+='form-select select2' data-placeholder='Select an options' data-allow-clear='true' %}
+                            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+
+                        {% elif field.field.widget.input_type == 'checkbox' %}
+                            <div class="form-check">
+                                {% render_field field class="form-check-input" %}
+                                <label class="form-check-label" for="{{ field.id_for_label }}">
+                                    {{ field.label }}
+                                </label>
+                            </div>
+
+                        {% elif field.field.widget.input_type == 'radio' %}
+                            {% for value, label in field.field.choices %}
+                            <div class="form-check">
+                                <input type="radio" 
+                                    name="{{ field.html_name }}" 
+                                    value="{{ value }}" 
+                                    id="id_{{ field.html_name }}_{{ forloop.counter0 }}"
+                                    class="form-check-input"
+                                    {% if field.value and value|stringformat:"s" == field.value|stringformat:"s" %}checked{% endif %}>
+                                <label class="form-check-label" for="id_{{ field.html_name }}_{{ forloop.counter0 }}">
+                                    {{ label }}
+                                </label>
+                            </div>
+                            {% endfor %}
+
+                        {% else %} {% endcomment %}
+                            {% render_field field class+="form-control" %}
+                            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                        {% comment %} {% endif %} {% endcomment %}
+                    </div>
+                {% endif %}
+
+                {% if field.help_text %}
+                    <div class="form-text text-body small">{{ field.help_text|safe }}</div>
+                {% endif %}
+            </div>
+        </div>
+    {% endif %}
+{% endfor %}

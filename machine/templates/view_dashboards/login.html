@@ -1,0 +1,68 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="VMWare Login">
+    <title>Login | VMWare</title>
+
+    <link rel="stylesheet" href="{% static 'libs/bootstrap/css/bootstrap.min.css' %}">
+    <link rel="stylesheet" href="{% static 'libs/bootstrap-icons/bootstrap-icons.css' %}">
+    <link rel="stylesheet" href="{% static 'css/main.css' %}">
+</head>
+<body>
+    <div class="login-wrapper">
+        <div class="login-bg-shape login-bg-shape-1"></div>
+        <div class="login-bg-shape login-bg-shape-2"></div>
+
+        <div class="login-card">
+            <a href="{% url 'view_dashboards:login' %}" class="login-brand text-decoration-none">
+                <i class="bi bi-asterisk"></i>
+                <span>VMWare</span>
+            </a>
+            <p class="login-subtitle">Sign in to access the desktop workspace.</p>
+
+            {% if messages %}
+                {% for message in messages %}
+                    <div class="alert alert-danger" role="alert">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+
+            <form method="post" action="." id="loginForm" class="needs-validation" novalidate>
+                {% csrf_token %}
+
+                {% for field in form %}
+                    <div class="login-form-group">
+                        <label for="{{ field.id_for_label }}" class="login-form-label">{{ field.label }}</label>
+                        <div class="login-input-group">
+                            {% if field.name == 'password' %}
+                                <i class="bi bi-shield-lock input-icon"></i>
+                            {% else %}
+                                <i class="bi bi-person input-icon"></i>
+                            {% endif %}
+                            {{ field }}
+                            {% if field.name == 'password' %}
+                                <button type="button" class="password-toggle-btn" id="toggle-password" aria-label="Show password">
+                                    <i class="bi bi-eye"></i>
+                                </button>
+                            {% endif %}
+                        </div>
+                        {% if field.errors %}
+                            <div class="text-danger small mt-1">{{ field.errors.0 }}</div>
+                        {% endif %}
+                    </div>
+                {% endfor %}
+
+                <button type="submit" class="btn-login" id="btn-submit">
+                    <span>Sign in</span>
+                    <i class="bi bi-arrow-right"></i>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <script src="{% static 'libs/bootstrap/js/bootstrap.bundle.min.js' %}"></script>
+    <script src="{% static 'js/auth.js' %}"></script>
+</body>
+</html>

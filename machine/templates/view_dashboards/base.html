@@ -1,0 +1,120 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="VMWare Dashboard">
+    <title>{{ page_title|default:"VMWare" }}</title>
+
+    <link rel="stylesheet" href="{% static 'libs/bootstrap/css/bootstrap.min.css' %}">
+    <link rel="stylesheet" href="{% static 'libs/bootstrap-icons/bootstrap-icons.css' %}">
+    <link rel="stylesheet" href="{% static 'css/main.css' %}">
+    <style>
+        .navbar-custom.navbar-no-search {
+            grid-template-columns: 1fr auto !important;
+        }
+        .navbar-custom.navbar-no-search .navbar-actions {
+            justify-self: end;
+            margin-left: auto;
+        }
+    </style>
+
+    {% block extra_css %}
+    {% endblock extra_css %}
+</head>
+<body>
+    <div class="sidebar-wrapper" id="sidebar">
+        <a href="{% url 'view_dashboards:dashboard' %}" class="sidebar-brand">
+            <i class="bi bi-asterisk"></i>
+            <span>VMWare</span>
+        </a>
+
+        <div class="flex-grow-1 overflow-y-auto">
+            {% include 'view_dashboards/_group_dashboard/superadmin/_sidebar.html' %}
+        </div>
+
+        <div class="sidebar-profile">
+            <span class="sidebar-profile-img d-inline-flex align-items-center justify-content-center">
+                <i class="bi bi-person-fill"></i>
+            </span>
+            <div class="sidebar-profile-info">
+                <div class="sidebar-profile-name">{{ user.username }}</div>
+                <div class="sidebar-profile-email">
+                    {% if is_superadmin %}Super Admin{% elif is_staff %}Staff{% else %}{{ user.email|default:"Signed in" }}{% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="main-wrapper">
+        <header class="navbar-custom navbar-no-search">
+            <div class="navbar-left">
+                <button class="btn-desktop-toggle d-none d-xl-flex align-items-center justify-content-center me-3" id="desktop-sidebar-toggle" type="button" aria-label="Minimize Sidebar">
+                    <i class="bi bi-chevron-bar-left"></i>
+                </button>
+                <button class="sidebar-toggle-btn me-2" id="sidebar-toggle" type="button" aria-label="Toggle Navigation">
+                    <i class="bi bi-list"></i>
+                </button>
+            </div>
+
+        <!--<div class="navbar-search-wrapper">
+                <input type="search" class="navbar-search-input" placeholder="Search desktops" aria-label="Search desktops">
+                <button class="navbar-search-btn" type="button" aria-label="Search">
+                    <i class="bi bi-search"></i>
+                </button>
+            </div>-->
+
+            <div class="navbar-actions">
+                <button class="navbar-action-btn me-1" type="button" aria-label="Toggle Fullscreen" id="btn-fullscreen">
+                    <i class="bi bi-arrows-fullscreen"></i>
+                </button>
+
+                <div class="dropdown ms-2">
+                    <button class="navbar-profile-btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" id="profile-dropdown">
+                        <span class="navbar-profile-img d-inline-flex align-items-center justify-content-center">
+                            <i class="bi bi-person-fill"></i>
+                        </span>
+                        <span class="navbar-profile-name d-none d-md-inline">{{ user.username }}</span>
+                        <i class="bi bi-chevron-down navbar-profile-caret"></i>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end dropdown-menu-profile" aria-labelledby="profile-dropdown">
+                        <li class="dropdown-header">{{ user.username }}</li>
+                        <li>
+                            <a class="dropdown-item text-danger" href="{% url 'view_dashboards:logout' %}">
+                                <i class="bi bi-box-arrow-right"></i> Log out
+                            </a>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </header>
+
+        {% if messages %}
+            {% for message in messages %}
+                <div class="alert alert-{% if message.level == DEFAULT_MESSAGE_LEVELS.ERROR %}danger{% else %}{{ message.tags }}{% endif %} alert-dismissible" role="alert">
+                    {{ message|safe }}
+                    <button type="button" class="btn-close shadow-none" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+            {% endfor %}
+        {% endif %}
+
+        {% block content %}
+        {% endblock content %}
+
+        <footer class="footer-custom">
+            <div class="footer-left">
+                <span class="footer-logo"><i class="bi bi-asterisk"></i> VMWare</span>
+                <span class="footer-separator">|</span>
+                <span class="footer-copy">&copy; 2026 VMWare. All rights reserved.</span>
+            </div>
+        </footer>
+    </div>
+
+    <script src="{% static 'libs/bootstrap/js/bootstrap.bundle.min.js' %}"></script>
+    <script src="{% static 'js/dashboard.js' %}"></script>
+
+    {% block extra_js %}
+    {% endblock extra_js %}
+</body>
+</html>

@@ -1,0 +1,44 @@
+{% extends "view_dashboards/base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Users</h1>
+        <p class="page-subtitle">Django users linked to an Alibaba end user ID.</p>
+    </div>
+    <a class="btn btn-dark btn-sm" href="{% url 'view_dashboards:user_profile_create' %}">Add user profile</a>
+</div>
+
+<div class="table-card-custom">
+    <div class="table-responsive">
+        <table class="table-custom">
+            <thead>
+                <tr>
+                    <th>User</th>
+                    <th>Email</th>
+                    <th>EDS end user ID</th>
+                    <th class="text-center">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for profile in user_profiles %}
+                <tr>
+                    <td>{{ profile.user.username }}</td>
+                    <td>{{ profile.user.email|default:"-" }}</td>
+                    <td>{{ profile.eds_end_user_id|default:"-" }}</td>
+                    <td class="text-center">
+                        <a class="table-btn-action" href="{% url 'view_dashboards:user_profile_update' profile.pk %}" title="Edit">
+                            <i class="bi bi-pencil"></i>
+                        </a>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="4" class="text-muted-green">No user profiles yet.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock content %}

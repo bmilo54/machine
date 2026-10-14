@@ -1,0 +1,100 @@
+{% extends "view_dashboards/base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">{{ desktop.name|default:"Untitled" }}</h1>
+        <p class="page-subtitle">{{ desktop.vm_id|default:"No cloud ID yet" }}</p>
+    </div>
+    <div class="d-flex flex-wrap gap-2">
+        {% if desktop.vm_id %}
+            <form method="post" action="{% url 'view_dashboards:desktop_power' desktop.pk 'start' %}">
+                {% csrf_token %}
+                <button class="btn btn-dark btn-sm" type="submit">Start</button>
+            </form>
+            <form method="post" action="{% url 'view_dashboards:desktop_power' desktop.pk 'stop' %}">
+                {% csrf_token %}
+                <button class="btn btn-outline-dark btn-sm" type="submit">Stop</button>
+            </form>
+            <form method="post" action="{% url 'view_dashboards:desktop_power' desktop.pk 'restart' %}">
+                {% csrf_token %}
+                <button class="btn btn-outline-dark btn-sm" type="submit">Restart</button>
+            </form>
+            <form method="post" action="{% url 'view_dashboards:desktop_connect' desktop.pk %}">
+                {% csrf_token %}
+                <button class="btn btn-outline-dark btn-sm" type="submit">Connect</button>
+            </form>
+        {% endif %}
+        <a class="btn-table-action" href="{% url 'view_dashboards:desktop_update' desktop.pk %}">Edit</a>
+        <a class="btn-table-action" href="{% url 'view_dashboards:desktop_list' %}">Back to list</a>
+    </div>
+</div>
+{% if not desktop.vm_id %}
+<p class="text-muted-green">Save an Alibaba desktop ID before starting, stopping, or connecting this desktop.</p>
+{% endif %}
+
+<div class="row g-4">
+    <div class="col-lg-5">
+        <div class="card">
+            <div class="card-header">
+                <h2 class="card-title">Details</h2>
+            </div>
+            <dl class="row mb-0">
+                <dt class="col-5">Status</dt>
+                <dd class="col-7">{{ desktop.get_status_display }}</dd>
+                <dt class="col-5">Assigned user</dt>
+                <dd class="col-7">{{ desktop.user|default:"Unassigned" }}</dd>
+                <dt class="col-5">Profile</dt>
+                <dd class="col-7">{{ desktop.current_profile|default:"-" }}</dd>
+                <dt class="col-5">CPU / RAM</dt>
+                <dd class="col-7">{{ desktop.cpu|default:"-" }} cores / {{ desktop.ram|default:"-" }} GB</dd>
+                <dt class="col-5">Disks</dt>
+                <dd class="col-7">System {{ desktop.system_disk }} GB · Data {{ desktop.data_disk }} GB</dd>
+                <dt class="col-5">Region</dt>
+                <dd class="col-7">{{ desktop.region }}</dd>
+                <dt class="col-5">Directory</dt>
+                <dd class="col-7">{{ desktop.directory_id|default:"-" }}</dd>
+                <dt class="col-5">Private IP</dt>
+                <dd class="col-7">{{ desktop.private_ip|default:"-" }}</dd>
+                <dt class="col-5">Last start</dt>
+                <dd class="col-7">{{ desktop.last_start_time|date:"Y-m-d H:i"|default:"-" }}</dd>
+                <dt class="col-5">Last stop</dt>
+                <dd class="col-7">{{ desktop.last_stop_time|date:"Y-m-d H:i"|default:"-" }}</dd>
+            </dl>
+        </div>
+    </div>
+    <div class="col-lg-7">
+        <div class="table-card-custom">
+            <div class="table-header-control">
+                <h2 class="card-title mb-0">Activity</h2>
+            </div>
+            <div class="table-responsive">
+                <table class="table-custom">
+                    <thead>
+                        <tr>
+                            <th>When</th>
+                            <th>Actor</th>
+                            <th>Action</th>
+                            <th>Details</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for log in activity_logs %}
+                        <tr>
+                            <td>{{ log.created|date:"Y-m-d H:i" }}</td>
+                            <td>{{ log.actor|default:"-" }}</td>
+                            <td>{{ log.action|default:"-" }}</td>
+                            <td>{{ log.details|default:"-"|truncatechars:80 }}</td>
+                        </tr>
+                        {% empty %}
+                        <tr>
+                            <td colspan="4" class="text-muted-green">No activity for this desktop.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock content %}

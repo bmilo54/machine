@@ -1,0 +1,85 @@
+{% extends "view_dashboards/base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Desktops</h1>
+        <p class="page-subtitle">Cloud desktops recorded in this workspace.</p>
+    </div>
+    <div class="d-flex flex-wrap gap-2">
+        <form method="post" action="{% url 'view_dashboards:desktop_sync' %}">
+            {% csrf_token %}
+            <button class="btn btn-outline-dark btn-sm" type="submit">Sync from Alibaba</button>
+        </form>
+        <a class="btn btn-dark btn-sm" href="{% url 'view_dashboards:desktop_create' %}">Add desktop</a>
+    </div>
+</div>
+
+<div class="table-card-custom">
+    <div class="table-responsive">
+        <table class="table-custom">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>User</th>
+                    <th>Status</th>
+                    <th>Spec</th>
+                    <th>Region</th>
+                    <th class="text-center">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for desktop in desktops %}
+                <tr>
+                    <td>
+                        <div class="table-user-name">{{ desktop.name|default:"Untitled" }}</div>
+                        <div class="table-user-sub">{{ desktop.vm_id|default:"No cloud ID yet" }}</div>
+                    </td>
+                    <td>{{ desktop.user|default:"Unassigned" }}</td>
+                    <td>
+                        <span class="badge-table {% if desktop.status == 'Running' %}success{% elif desktop.status == 'Error' %}failed{% else %}pending{% endif %}">
+                            {{ desktop.get_status_display }}
+                        </span>
+                    </td>
+                    <td>
+                        {% if desktop.cpu or desktop.ram %}
+                            {{ desktop.cpu|default:"-" }}C / {{ desktop.ram|default:"-" }}GB
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>{{ desktop.region }}</td>
+                    <td class="text-center">
+                        <a class="table-btn-action" href="{% url 'view_dashboards:desktop_detail' desktop.pk %}" title="View details">
+                            <i class="bi bi-eye"></i>
+                        </a>
+                        <a class="table-btn-action" href="{% url 'view_dashboards:desktop_update' desktop.pk %}" title="Edit">
+                            <i class="bi bi-pencil"></i>
+                        </a>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="6" class="text-muted-green">No desktops yet.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if is_paginated %}
+    <nav class="d-flex justify-content-between align-items-center p-3" aria-label="Desktop pages">
+        {% if page_obj.has_previous %}
+            <a class="btn-table-action" href="?page={{ page_obj.previous_page_number }}">Previous</a>
+        {% else %}
+            <span></span>
+        {% endif %}
+        <span class="text-muted-green">Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+        {% if page_obj.has_next %}
+            <a class="btn-table-action" href="?page={{ page_obj.next_page_number }}">Next</a>
+        {% else %}
+            <span></span>
+        {% endif %}
+    </nav>
+    {% endif %}
+</div>
+{% endblock content %}

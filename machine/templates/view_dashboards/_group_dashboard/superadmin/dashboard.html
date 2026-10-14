@@ -1,0 +1,328 @@
+{% extends "view_dashboards/base.html" %}
+
+{% block extra_css %}
+<style>
+    .dash-enter {
+        animation: dashRise 0.72s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+        animation-delay: var(--enter, 0ms);
+    }
+    .page-header .page-title::after {
+        content: "";
+        display: block;
+        width: 2.4rem;
+        height: 3px;
+        margin-top: 0.5rem;
+        border-radius: 99px;
+        background: #072F1F;
+        transform-origin: left center;
+        animation: dashDrawX 0.6s cubic-bezier(0.22, 1, 0.36, 1) 0.18s backwards;
+    }
+    .metric-card {
+        position: relative;
+        min-height: 164px;
+        padding: 1.35rem;
+        overflow: hidden;
+        border: 1px solid rgba(11, 19, 15, 0.08);
+        border-radius: 8px;
+        background: #ffffff;
+        box-shadow: 0 2px 8px rgba(11, 19, 15, 0.03);
+        transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.45s ease;
+    }
+    .metric-card::before {
+        content: "";
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 4px;
+        background: var(--metric-color, #072F1F);
+        transform-origin: top center;
+        animation: dashDrawY 0.55s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+        animation-delay: var(--enter, 0ms);
+    }
+    .metric-card::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: -70%;
+        width: 42%;
+        height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.7), transparent);
+        transform: skewX(-18deg);
+        pointer-events: none;
+        opacity: 0;
+    }
+    .metric-card:hover {
+        transform: translateY(-6px);
+        box-shadow: 0 18px 40px rgba(11, 19, 15, 0.08);
+    }
+    .metric-card:hover::after {
+        animation: dashSheen 0.75s ease;
+    }
+    .metric-primary { --metric-color: #072F1F; }
+    .metric-success { --metric-color: #16a34a; }
+    .metric-warning { --metric-color: #d97706; }
+    .metric-danger { --metric-color: #dc2626; }
+    .metric-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+    }
+    .metric-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        color: #6b7280;
+        font-size: 0.78rem;
+        font-weight: 800;
+        text-transform: uppercase;
+    }
+    .metric-live {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #16a34a;
+        box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.45);
+        animation: dashPulse 1.8s ease-out infinite;
+    }
+    .metric-icon {
+        display: inline-grid;
+        place-items: center;
+        width: 42px;
+        height: 42px;
+        border-radius: 8px;
+        background: #f3f6f4;
+        color: var(--metric-color, #072F1F);
+        font-size: 1.1rem;
+        transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.3s ease;
+    }
+    .metric-card:hover .metric-icon {
+        transform: scale(1.08) rotate(-8deg);
+        background: color-mix(in srgb, var(--metric-color) 14%, #ffffff);
+    }
+    .metric-value {
+        margin-top: 1rem;
+        color: #0b130f;
+        font-size: 2.18rem;
+        font-weight: 800;
+        line-height: 1;
+        font-variant-numeric: tabular-nums;
+    }
+    .metric-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin-top: 0.9rem;
+        color: #6b7280;
+        font-size: 0.9rem;
+        font-weight: 700;
+    }
+    .dash-cta,
+    .dash-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+    .dash-cta {
+        transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.2s ease;
+    }
+    .dash-cta i,
+    .dash-link i {
+        transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    .dash-cta:hover {
+        transform: translateY(-2px);
+    }
+    .dash-cta:hover i,
+    .dash-link:hover i {
+        transform: translateX(4px);
+    }
+    .dash-activity tbody tr {
+        animation: dashFade 0.45s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+    }
+    .dash-activity tbody tr:nth-child(1) { animation-delay: 0.52s; }
+    .dash-activity tbody tr:nth-child(2) { animation-delay: 0.58s; }
+    .dash-activity tbody tr:nth-child(3) { animation-delay: 0.64s; }
+    .dash-activity tbody tr:nth-child(4) { animation-delay: 0.70s; }
+    .dash-activity tbody tr:nth-child(5) { animation-delay: 0.76s; }
+    .dash-activity tbody tr:nth-child(6) { animation-delay: 0.82s; }
+    .dash-activity tbody tr:nth-child(7) { animation-delay: 0.88s; }
+    .dash-activity tbody tr:nth-child(8) { animation-delay: 0.94s; }
+
+    @keyframes dashRise {
+        from { opacity: 0; transform: translateY(18px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes dashFade {
+        from { opacity: 0; }
+        to { opacity: 1; }
+    }
+    @keyframes dashDrawX {
+        from { transform: scaleX(0); }
+        to { transform: scaleX(1); }
+    }
+    @keyframes dashDrawY {
+        from { transform: scaleY(0); }
+        to { transform: scaleY(1); }
+    }
+    @keyframes dashSheen {
+        0% { left: -70%; opacity: 0.85; }
+        100% { left: 140%; opacity: 0; }
+    }
+    @keyframes dashPulse {
+        70% { box-shadow: 0 0 0 7px rgba(22, 163, 74, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .dash-enter,
+        .metric-card::before,
+        .page-header .page-title::after,
+        .dash-activity tbody tr,
+        .metric-live {
+            animation: none !important;
+        }
+        .metric-card,
+        .metric-icon,
+        .dash-cta,
+        .dash-cta i,
+        .dash-link i {
+            transition: none;
+        }
+    }
+</style>
+{% endblock extra_css %}
+
+{% block content %}
+<div class="page-header dash-enter" style="--enter: 0ms">
+    <div>
+        <h1 class="page-title">Dashboard</h1>
+        <p class="page-subtitle">Cloud desktops assigned inside this workspace.</p>
+    </div>
+    <a class="btn btn-dark btn-sm dash-cta" href="{% url 'view_dashboards:desktop_list' %}">
+        View desktops
+        <i class="bi bi-arrow-right" aria-hidden="true"></i>
+    </a>
+</div>
+
+<section class="row g-3" aria-label="Desktop statistics">
+    <div class="col-12 col-sm-6 col-xl-3">
+        <article class="metric-card metric-primary dash-enter" style="--enter: 80ms">
+            <div class="metric-top">
+                <span class="metric-label">Total</span>
+                <span class="metric-icon"><i class="bi bi-display" aria-hidden="true"></i></span>
+            </div>
+            <div class="metric-value" data-count="{{ stats.total|default:0 }}" data-count-delay="140">{{ stats.total }}</div>
+            <div class="metric-meta"><span>desktops on record</span></div>
+        </article>
+    </div>
+    <div class="col-12 col-sm-6 col-xl-3">
+        <article class="metric-card metric-success dash-enter" style="--enter: 160ms">
+            <div class="metric-top">
+                <span class="metric-label">Running <span class="metric-live" aria-hidden="true"></span></span>
+                <span class="metric-icon"><i class="bi bi-play-circle" aria-hidden="true"></i></span>
+            </div>
+            <div class="metric-value" data-count="{{ stats.running|default:0 }}" data-count-delay="220">{{ stats.running }}</div>
+            <div class="metric-meta"><span>currently on</span></div>
+        </article>
+    </div>
+    <div class="col-12 col-sm-6 col-xl-3">
+        <article class="metric-card metric-warning dash-enter" style="--enter: 240ms">
+            <div class="metric-top">
+                <span class="metric-label">Stopped</span>
+                <span class="metric-icon"><i class="bi bi-stop-circle" aria-hidden="true"></i></span>
+            </div>
+            <div class="metric-value" data-count="{{ stats.stopped|default:0 }}" data-count-delay="300">{{ stats.stopped }}</div>
+            <div class="metric-meta"><span>powered off</span></div>
+        </article>
+    </div>
+    <div class="col-12 col-sm-6 col-xl-3">
+        <article class="metric-card metric-danger dash-enter" style="--enter: 320ms">
+            <div class="metric-top">
+                <span class="metric-label">Need attention</span>
+                <span class="metric-icon"><i class="bi bi-exclamation-triangle" aria-hidden="true"></i></span>
+            </div>
+            <div class="metric-value" data-count="{{ stats.creating|add:stats.error }}" data-count-delay="380">{{ stats.creating|add:stats.error }}</div>
+            <div class="metric-meta">
+                <span>Creating <span data-count="{{ stats.creating|default:0 }}" data-count-delay="420">{{ stats.creating }}</span></span>
+                <span>Error <span data-count="{{ stats.error|default:0 }}" data-count-delay="460">{{ stats.error }}</span></span>
+            </div>
+        </article>
+    </div>
+</section>
+
+<div class="row g-4 mt-1">
+    <div class="col-12">
+        <div class="table-card-custom dash-enter dash-activity" style="--enter: 420ms">
+            <div class="table-header-control">
+                <h2 class="card-title mb-0">Recent activity</h2>
+                <a class="btn-table-action dash-link" href="{% url 'view_dashboards:activity_list' %}">
+                    View all
+                    <i class="bi bi-arrow-right" aria-hidden="true"></i>
+                </a>
+            </div>
+            <div class="table-responsive">
+                <table class="table-custom">
+                    <thead>
+                        <tr>
+                            <th>When</th>
+                            <th>Actor</th>
+                            <th>Action</th>
+                            <th>Desktop</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for log in recent_logs %}
+                        <tr>
+                            <td>{{ log.created|date:"Y-m-d H:i" }}</td>
+                            <td>{{ log.actor|default:"-" }}</td>
+                            <td>{{ log.action|default:"-" }}</td>
+                            <td>
+                                <a href="{% url 'view_dashboards:desktop_detail' log.virtual_machine_id %}">{{ log.virtual_machine }}</a>
+                            </td>
+                        </tr>
+                        {% empty %}
+                        <tr>
+                            <td colspan="4" class="text-muted-green">No activity yet.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock content %}
+
+{% block extra_js %}
+<script>
+(function () {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        return;
+    }
+    document.querySelectorAll("[data-count]").forEach(function (el) {
+        var target = Number(el.getAttribute("data-count"));
+        if (!Number.isFinite(target)) {
+            return;
+        }
+        var delay = Number(el.getAttribute("data-count-delay")) || 0;
+        var duration = 860;
+        window.setTimeout(function () {
+            var start = null;
+            el.textContent = "0";
+            function tick(now) {
+                if (start === null) {
+                    start = now;
+                }
+                var progress = Math.min(1, (now - start) / duration);
+                var eased = 1 - Math.pow(1 - progress, 3);
+                el.textContent = String(Math.round(target * eased));
+                if (progress < 1) {
+                    window.requestAnimationFrame(tick);
+                }
+            }
+            window.requestAnimationFrame(tick);
+        }, delay);
+    });
+})();
+</script>
+{% endblock extra_js %}

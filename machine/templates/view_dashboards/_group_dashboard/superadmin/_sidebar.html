@@ -1,0 +1,35 @@
+<div class="sidebar-menu-section">
+    <div class="sidebar-menu-title">Menu</div>
+    <ul class="sidebar-menu-list">
+        <li class="sidebar-menu-item">
+            <a href="{% url 'view_dashboards:dashboard' %}" class="sidebar-menu-link {% if main_nav == 'dashboard' %}active{% endif %}" title="Dashboard">
+                <i class="bi bi-grid-fill"></i>
+                <span>Dashboard</span>
+            </a>
+        </li>
+        <li class="sidebar-menu-item">
+            <a href="{% url 'view_dashboards:desktop_list' %}" class="sidebar-menu-link {% if main_nav == 'desktops' %}active{% endif %}" title="Desktops">
+                <i class="bi bi-display"></i>
+                <span>Desktops</span>
+            </a>
+        </li>
+        <li class="sidebar-menu-item">
+            <a href="{% url 'view_dashboards:vm_profile_list' %}" class="sidebar-menu-link {% if main_nav == 'vm_profiles' %}active{% endif %}" title="VM Profiles">
+                <i class="bi bi-hdd"></i>
+                <span>VM Profiles</span>
+            </a>
+        </li>
+        <li class="sidebar-menu-item">
+            <a href="{% url 'view_dashboards:user_profile_list' %}" class="sidebar-menu-link {% if main_nav == 'users' %}active{% endif %}" title="Users">
+                <i class="bi bi-people"></i>
+                <span>Users</span>
+            </a>
+        </li>
+        <li class="sidebar-menu-item">
+            <a href="{% url 'view_dashboards:activity_list' %}" class="sidebar-menu-link {% if main_nav == 'activity' %}active{% endif %}" title="Activity">
+                <i class="bi bi-clock-history"></i>
+                <span>Activity</span>
+            </a>
+        </li>
+    </ul>
+</div>

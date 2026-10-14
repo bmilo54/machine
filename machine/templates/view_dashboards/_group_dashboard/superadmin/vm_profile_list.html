@@ -1,0 +1,48 @@
+{% extends "view_dashboards/base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">VM Profiles</h1>
+        <p class="page-subtitle">Hardware templates for cloud desktops.</p>
+    </div>
+    <a class="btn btn-dark btn-sm" href="{% url 'view_dashboards:vm_profile_create' %}">Add profile</a>
+</div>
+
+<div class="table-card-custom">
+    <div class="table-responsive">
+        <table class="table-custom">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>CPU</th>
+                    <th>RAM</th>
+                    <th>Disks</th>
+                    <th>Instance type</th>
+                    <th class="text-center">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for profile in vm_profiles %}
+                <tr>
+                    <td>{{ profile.name|default:"Untitled" }}</td>
+                    <td>{{ profile.cpu|default:"-" }}</td>
+                    <td>{{ profile.ram|default:"-" }} GB</td>
+                    <td>{{ profile.system_disk|default:"-" }} / {{ profile.data_disk|default:"-" }} GB</td>
+                    <td>{{ profile.instance_type_code|default:"-" }}</td>
+                    <td class="text-center">
+                        <a class="table-btn-action" href="{% url 'view_dashboards:vm_profile_update' profile.pk %}" title="Edit">
+                            <i class="bi bi-pencil"></i>
+                        </a>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="6" class="text-muted-green">No VM profiles yet.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock content %}
