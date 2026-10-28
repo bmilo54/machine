@@ -1,3 +1,4 @@
+import base64
 import logging
 
 from django.shortcuts import get_object_or_404
@@ -223,7 +224,7 @@ class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
     group_required = ['superadmin']
     model = VirtualMachine
     form_class = DesktopCreateForm
-    page_subtitle = 'Creates a Windows desktop in Amazon WorkSpaces. Billing is hourly while the desktop is running.'
+    page_subtitle = 'Purchases a Windows 11 Pro computer in China (Hangzhou). Alibaba bills it pay-as-you-go.'
     cancel_url_name = 'view_dashboards:desktop_list'
 
     def get_context_data(self, **kwargs):
@@ -235,12 +236,13 @@ class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
 
     def form_valid(self, form):
         vm = form.save(commit=False)
+        end_user_id = ""
+        if vm.user_id:
+            profile = Profile.objects.filter(user_id=vm.user_id).first()
+            if profile and profile.eds_end_user_id:
+                end_user_id = profile.eds_end_user_id
         try:
-            created = create_cloud_desktop(
-                vm.name,
-                vm.current_profile,
-                form.cleaned_data["directory_username"],
-            )
+            created = create_cloud_desktop(vm.name, vm.current_profile, end_user_id)
         except AlibabaApiError as exc:
             form.add_error(None, str(exc))
             return self.form_invalid(form)
@@ -261,11 +263,11 @@ class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
             vm,
             'Assign' if vm.user_id else None,
             new_value=str(vm.user or ''),
-            details='Created an Amazon WorkSpace, AutoStop hourly billing',
+            details='Created Windows 11 Pro desktop on Alibaba, pay-as-you-go',
         )
         messages.success(
             self.request,
-            'AWS is creating this desktop. Billing is hourly while it is running. Sync from AWS to refresh the status.',
+            'Alibaba is creating this Windows 11 Pro desktop. Billing is pay-as-you-go. Sync from Alibaba to refresh the status.',
         )
         return HttpResponseRedirect(self.get_success_url())
 
@@ -412,7 +414,7 @@ class UserProfileCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
     group_required = ['superadmin']
     model = Profile
     form_class = UserProfileForm
-    page_subtitle = 'Link a dashboard user to a WorkSpaces directory username.'
+    page_subtitle = 'Link a Django user to an Alibaba end user ID.'
     cancel_url_name = 'view_dashboards:user_profile_list'
 
     def get_context_data(self, **kwargs):
@@ -437,7 +439,7 @@ class UserProfileUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
     group_required = ['superadmin']
     model = Profile
     form_class = UserProfileForm
-    page_subtitle = 'Update the WorkSpaces directory username for this account.'
+    page_subtitle = 'Update the Alibaba end user ID for this account.'
     cancel_url_name = 'view_dashboards:user_profile_list'
 
     def get_context_data(self, **kwargs):
@@ -477,9 +479,9 @@ class ActivityLogListView(GroupRequiredMixin, DashboardMixin, ListView):
 
 
 POWER_ACTIONS = {
-    "start": ("Start", "start_workspaces", "Starting", "last_start_time"),
-    "stop": ("Stop", "stop_workspaces", "Stopping", "last_stop_time"),
-    "restart": ("Restart", "reboot_workspaces", "Starting", "last_start_time"),
+    "start": ("Start", "StartDesktops", "Starting", "last_start_time"),
+    "stop": ("Stop", "StopDesktops", "Stopping", "last_stop_time"),
+    "restart": ("Restart", "RebootDesktops", "Starting", "last_start_time"),
 }
 
 
@@ -496,7 +498,7 @@ class DesktopSyncView(GroupRequiredMixin, DashboardMixin, View):
         for desktop in desktops:
             if apply_desktop(desktop):
                 saved += 1
-        messages.success(request, "Synced {} desktop(s) from AWS.".format(saved))
+        messages.success(request, "Synced {} desktop(s) from Alibaba.".format(saved))
         return HttpResponseRedirect(reverse("view_dashboards:desktop_list"))
 
 
@@ -531,7 +533,7 @@ class DesktopDeleteView(GroupRequiredMixin, DashboardMixin, DeleteView):
                     return HttpResponseRedirect(reverse("view_dashboards:desktop_delete", args=[vm.pk]))
                 removed_from_cloud = False
         if removed_from_cloud:
-            messages.success(self.request, "Desktop removed from AWS and this dashboard.")
+            messages.success(self.request, "Desktop removed from Alibaba and this dashboard.")
         else:
             messages.success(self.request, "Desktop removed from this dashboard.")
         return super(DesktopDeleteView, self).form_valid(form)
@@ -569,9 +571,12 @@ class DesktopConnectView(GroupRequiredMixin, DashboardMixin, View):
             messages.error(request, str(exc))
             return HttpResponseRedirect(detail_url)
 
-        content = ticket.encode("utf-8")
-        filename = "{}-connect.txt".format(vm.vm_id or "desktop")
-        response = HttpResponse(content, content_type="text/plain")
+        try:
+            content = base64.b64decode(ticket, validate=True)
+        except (ValueError, TypeError):
+            content = ticket.encode("utf-8")
+        filename = "{}.ica".format(vm.vm_id or "desktop")
+        response = HttpResponse(content, content_type="application/octet-stream")
         response["Content-Disposition"] = 'attachment; filename="{}"'.format(filename)
-        write_log(request, vm, "Connect", "Downloaded WorkSpaces connection details")
+        write_log(request, vm, "Connect", "Downloaded connection ticket")
         return response

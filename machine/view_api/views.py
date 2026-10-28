@@ -1,10 +1,16 @@
+import base64
+import hashlib
+import hmac
+import json
+import time
+import uuid
 from datetime import datetime, timezone
 from functools import wraps
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
-import boto3
-from botocore.exceptions import BotoCoreError, ClientError
 from django.conf import settings
-from django.contrib.auth.models import User
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_GET, require_POST
@@ -17,41 +23,26 @@ ACCESS_KEY_SECRET = settings.ACCESS_KEY_SECRET
 REGION_ID = settings.REGION_ID
 DIRECTORY_ID = settings.DIRECTORY_ID
 
-COMPUTE_SPECS = {
-    "VALUE": (1, 2),
-    "STANDARD": (2, 4),
-    "PERFORMANCE": (2, 8),
-    "POWER": (4, 16),
-    "POWERPRO": (8, 32),
-    "GENERALPURPOSE_4XLARGE": (16, 64),
-    "GENERALPURPOSE_8XLARGE": (32, 128),
-}
+ECD_VERSION = "2020-09-30"
+WINDOWS_11_PRO_IMAGE_ID = "desktopimage-windows-11-64-asp"
+DEFAULT_DESKTOP_TYPE = "eds.enterprise_office.6c12g"
+DEFAULT_POLICY_GROUP_ID = "system-all-enabled-policy"
 STATUS_FROM_CLOUD = {
-    "AVAILABLE": "Running",
-    "STOPPED": "Stopped",
-    "SUSPENDED": "Stopped",
-    "STARTING": "Starting",
-    "REBOOTING": "Starting",
-    "STOPPING": "Stopping",
-    "PENDING": "Creating",
-    "REBUILDING": "Creating",
-    "RESTORING": "Creating",
-    "UPDATING": "Creating",
-    "TERMINATING": "Stopping",
-    "TERMINATED": "Error",
-    "ERROR": "Error",
-    "UNHEALTHY": "Error",
-    "IMPAIRED": "Error",
+    "Running": "Running",
+    "Stopped": "Stopped",
+    "Starting": "Starting",
+    "Stopping": "Stopping",
+    "Pending": "Creating",
+    "Rebuilding": "Creating",
+    "Expired": "Error",
+    "Deleted": "Error",
 }
 
 
-class CloudApiError(Exception):
+class AlibabaApiError(Exception):
     def __init__(self, message, code=""):
         super().__init__(message)
         self.code = code
-
-
-AlibabaApiError = CloudApiError
 
 
 def login_required_json(view):
@@ -76,134 +67,131 @@ def staff_required_json(view):
     return wrapper
 
 
-def workspaces_client():
-    if not ACCESS_KEY_ID or ACCESS_KEY_ID == "xxxx" or not ACCESS_KEY_SECRET or ACCESS_KEY_SECRET == "xxxx":
-        raise CloudApiError("Set ACCESS_KEY_ID and ACCESS_KEY_SECRET in local settings to an AWS IAM access key.")
-    if not REGION_ID or REGION_ID == "xxxx":
-        raise CloudApiError("Set REGION_ID in local settings. Singapore is ap-southeast-1.")
-    return boto3.client(
-        "workspaces",
-        region_name=REGION_ID,
-        aws_access_key_id=ACCESS_KEY_ID,
-        aws_secret_access_key=ACCESS_KEY_SECRET,
+def percent_encode(value):
+    encoded = quote(str(value), safe="")
+    return encoded.replace("+", "%20").replace("*", "%2A").replace("%7E", "~")
+
+
+def call_ecd(action, extra=None):
+    params = {
+        "Action": action,
+        "Format": "JSON",
+        "Version": ECD_VERSION,
+        "AccessKeyId": ACCESS_KEY_ID,
+        "SignatureMethod": "HMAC-SHA1",
+        "Timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "SignatureVersion": "1.0",
+        "SignatureNonce": uuid.uuid4().hex,
+        "RegionId": REGION_ID,
+    }
+    if extra:
+        params.update(extra)
+
+    canonical = "&".join(
+        f"{percent_encode(key)}={percent_encode(params[key])}" for key in sorted(params)
     )
+    string_to_sign = f"GET&%2F&{percent_encode(canonical)}"
+    digest = hmac.new(
+        f"{ACCESS_KEY_SECRET}&".encode("utf-8"),
+        string_to_sign.encode("utf-8"),
+        hashlib.sha1,
+    ).digest()
+    params["Signature"] = base64.b64encode(digest).decode("utf-8")
+    query = "&".join(
+        f"{percent_encode(key)}={percent_encode(params[key])}" for key in sorted(params)
+    )
+    request = Request(f"https://ecd.{REGION_ID}.aliyuncs.com/?{query}")
 
-
-def aws_error(exc):
-    if isinstance(exc, ClientError):
-        error = exc.response.get("Error", {})
-        return CloudApiError(error.get("Message") or "AWS request failed.", error.get("Code") or "")
-    return CloudApiError(str(exc))
-
-
-def call_workspaces(method_name, **kwargs):
-    client = workspaces_client()
     try:
-        return client, getattr(client, method_name)(**kwargs)
-    except (ClientError, BotoCoreError) as exc:
-        raise aws_error(exc) from exc
-
-
-def failed_request(payload):
-    failed = payload.get("FailedRequests") or []
-    if not failed:
-        return None
-    first = failed[0]
-    return CloudApiError(
-        first.get("ErrorMessage") or "AWS rejected the WorkSpaces request.",
-        first.get("ErrorCode") or "",
-    )
-
-
-def bundle_score(bundle):
-    name = (bundle.get("Name") or "").lower()
-    if "windows" not in name:
-        return 0
-    if "server 2022" in name and "standard" in name:
-        return 100
-    if "standard" in name:
-        return 80
-    return 40
-
-
-def choose_bundle(client, profile=None):
-    configured = ""
-    if profile and (profile.instance_type_code or "").startswith("wsb-"):
-        configured = profile.instance_type_code.strip()
-    if not configured:
-        configured = getattr(settings, "BUNDLE_ID", "") or ""
-    if configured and configured != "xxxx":
+        with urlopen(request, timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
         try:
-            found = client.describe_workspace_bundles(BundleIds=[configured])
-        except (ClientError, BotoCoreError) as exc:
-            raise aws_error(exc) from exc
-        bundles = found.get("Bundles") or []
-        if not bundles:
-            raise CloudApiError("The WorkSpaces bundle was not found in this region.")
-        return bundles[0]
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {"Message": raw or exc.reason}
+        raise AlibabaApiError(
+            payload.get("Message") or "Alibaba Cloud request failed.",
+            payload.get("Code") or str(exc.code),
+        ) from exc
+    except URLError as exc:
+        raise AlibabaApiError(f"Could not reach Alibaba Cloud: {exc.reason}") from exc
 
-    bundles = []
-    token = ""
-    while True:
-        kwargs = {"Owner": "AMAZON"}
-        if token:
-            kwargs["NextToken"] = token
-        try:
-            page = client.describe_workspace_bundles(**kwargs)
-        except (ClientError, BotoCoreError) as exc:
-            raise aws_error(exc) from exc
-        bundles.extend(page.get("Bundles") or [])
-        token = page.get("NextToken") or ""
-        if not token:
-            break
-    ranked = sorted(bundles, key=bundle_score, reverse=True)
-    if not ranked or bundle_score(ranked[0]) == 0:
-        raise CloudApiError("No Windows WorkSpaces bundle was found in this region.")
-    return ranked[0]
+    if payload.get("Code"):
+        raise AlibabaApiError(payload.get("Message") or "Alibaba Cloud request failed.", payload["Code"])
+    return payload
 
 
-def bundle_resources(bundle):
-    compute = (bundle.get("ComputeType") or {}).get("Name")
-    cpu, ram = COMPUTE_SPECS.get(compute, (None, None))
-    system_disk = (bundle.get("RootStorage") or {}).get("Capacity") or 80
-    data_disk = (bundle.get("UserStorage") or {}).get("Capacity") or 50
-    return cpu, ram, system_disk, data_disk
+def desktop_type_resources(desktop_type):
+    matched = None
+    for part in str(desktop_type or "").split("."):
+        if "c" in part and part.endswith("g"):
+            matched = part
+    if not matched or "c" not in matched:
+        return None, None
+    cpu_text, ram_text = matched[:-1].split("c", 1)
+    if cpu_text.isdigit() and ram_text.isdigit():
+        return int(cpu_text), int(ram_text)
+    return None, None
 
 
-def create_cloud_desktop(name, profile=None, directory_username=""):
+def resolve_desktop_spec(profile):
+    desktop_type = DEFAULT_DESKTOP_TYPE
+    if profile and profile.instance_type_code:
+        desktop_type = profile.instance_type_code.strip() or DEFAULT_DESKTOP_TYPE
+    elif profile and profile.cpu == 8 and profile.ram == 16:
+        desktop_type = "eds.enterprise_office.8c16g"
+
+    cpu, ram = desktop_type_resources(desktop_type)
+    if profile and cpu is None:
+        cpu = profile.cpu
+    if profile and ram is None:
+        ram = profile.ram
+
+    system_disk = 80
+    data_disk = 0
+    if profile and profile.system_disk and profile.system_disk >= 80:
+        system_disk = profile.system_disk
+    if profile and profile.data_disk and profile.data_disk >= 40:
+        data_disk = profile.data_disk
+    return desktop_type, cpu, ram, system_disk, data_disk
+
+
+def desktop_id_from(payload):
+    desktop_ids = payload.get("DesktopId") or []
+    if isinstance(desktop_ids, str):
+        desktop_ids = [desktop_ids]
+    if not desktop_ids:
+        raise AlibabaApiError("Alibaba did not return a desktop ID.")
+    desktop_id = desktop_ids[0]
+    if isinstance(desktop_id, (list, tuple)):
+        desktop_id = desktop_id[0]
+    return str(desktop_id).strip().strip('[]"')
+
+
+def create_cloud_desktop(name, profile=None, end_user_id=""):
     if not DIRECTORY_ID or DIRECTORY_ID == "xxxx":
-        raise CloudApiError("Set DIRECTORY_ID in local settings to the WorkSpaces directory ID, such as d-xxxxxxxxxx.")
-    if not directory_username:
-        raise CloudApiError("Enter the WorkSpaces directory username. That user must already exist in the directory.")
+        raise AlibabaApiError("Set DIRECTORY_ID in local settings to the Hangzhou office network.")
 
-    client = workspaces_client()
-    bundle = choose_bundle(client, profile)
-    cpu, ram, system_disk, data_disk = bundle_resources(bundle)
-    try:
-        payload = client.create_workspaces(
-            Workspaces=[
-                {
-                    "DirectoryId": DIRECTORY_ID,
-                    "UserName": directory_username,
-                    "BundleId": bundle["BundleId"],
-                    "WorkspaceName": name,
-                    "WorkspaceProperties": {
-                        "RunningMode": "AUTO_STOP",
-                        "RunningModeAutoStopTimeoutInMinutes": 60,
-                    },
-                    "Tags": [{"Key": "Name", "Value": name}],
-                }
-            ]
-        )
-    except (ClientError, BotoCoreError) as exc:
-        raise aws_error(exc) from exc
+    desktop_type, cpu, ram, system_disk, data_disk = resolve_desktop_spec(profile)
+    extra = {
+        "DesktopName": name,
+        "Amount": 1,
+        "OfficeSiteId": DIRECTORY_ID,
+        "PolicyGroupId": DEFAULT_POLICY_GROUP_ID,
+        "ChargeType": "PostPaid",
+        "DesktopAttachment.ImageId": WINDOWS_11_PRO_IMAGE_ID,
+        "DesktopAttachment.SystemDiskSize": system_disk,
+        "DesktopAttachment.DataDiskSize": data_disk,
+        "DesktopAttachment.DesktopType": desktop_type,
+    }
+    if end_user_id:
+        extra["EndUserId.1"] = end_user_id
 
-    error = failed_request(payload)
-    pending = payload.get("PendingRequests") or []
-    if error or not pending:
-        raise error or CloudApiError("AWS did not return a WorkSpace ID.")
+    payload = call_ecd("CreateDesktops", extra)
     return {
-        "vm_id": pending[0]["WorkspaceId"],
+        "vm_id": desktop_id_from(payload),
         "cpu": cpu,
         "ram": ram,
         "system_disk": system_disk,
@@ -214,31 +202,44 @@ def create_cloud_desktop(name, profile=None, directory_username=""):
 def delete_cloud_desktop(vm_id):
     if not vm_id:
         return
-    _client, payload = call_workspaces("terminate_workspaces", TerminateWorkspaceRequests=[{"WorkspaceId": vm_id}])
-    error = failed_request(payload)
-    if error:
-        raise error
+    call_ecd("DeleteDesktops", {"DesktopId.1": vm_id})
 
 
 def describe_desktops():
-    workspaces = []
-    token = ""
-    while True:
-        kwargs = {}
+    desktops = []
+    next_token = ""
+    for _ in range(20):
+        extra = {"MaxResults": 100}
         if DIRECTORY_ID and DIRECTORY_ID != "xxxx":
-            kwargs["DirectoryId"] = DIRECTORY_ID
-        if token:
-            kwargs["NextToken"] = token
-        _client, payload = call_workspaces("describe_workspaces", **kwargs)
-        workspaces.extend(payload.get("Workspaces") or [])
-        token = payload.get("NextToken") or ""
-        if not token:
+            extra["DirectoryId"] = DIRECTORY_ID
+        if next_token:
+            extra["NextToken"] = next_token
+        payload = call_ecd("DescribeDesktops", extra)
+        desktops.extend(payload.get("Desktops") or [])
+        next_token = payload.get("NextToken") or ""
+        if not next_token:
             break
-    return workspaces
+    return desktops
 
 
-def apply_desktop(workspace):
-    vm_id = workspace.get("WorkspaceId")
+def memory_gb(value):
+    if value in (None, ""):
+        return None
+    mib = int(value)
+    if mib >= 512:
+        return max(1, round(mib / 1024))
+    return mib
+
+
+def disk_gb(desktop, disk_type):
+    for disk in desktop.get("Disks") or []:
+        if disk.get("DiskType") == disk_type and disk.get("DiskSize") not in (None, ""):
+            return int(disk["DiskSize"])
+    return None
+
+
+def apply_desktop(desktop):
+    vm_id = desktop.get("DesktopId")
     if not vm_id:
         return None
 
@@ -246,38 +247,38 @@ def apply_desktop(workspace):
         vm_id=vm_id,
         defaults={"region": REGION_ID, "status": "Creating"},
     )
-    vm.name = vm.name or workspace.get("ComputerName") or workspace.get("UserName")
-    vm.region = workspace.get("Region") or REGION_ID
-    vm.directory_id = workspace.get("DirectoryId") or vm.directory_id
-    vm.status = STATUS_FROM_CLOUD.get(workspace.get("State"), "Error")
-
-    properties = workspace.get("WorkspaceProperties") or {}
-    cpu, ram = COMPUTE_SPECS.get(properties.get("ComputeTypeName"), (None, None))
-    if cpu is not None:
-        vm.cpu = cpu
+    vm.name = desktop.get("DesktopName") or vm.name
+    vm.region = REGION_ID
+    vm.directory_id = desktop.get("DirectoryId") or desktop.get("OfficeSiteId") or vm.directory_id
+    vm.status = STATUS_FROM_CLOUD.get(desktop.get("DesktopStatus"), "Error")
+    vm.cpu = desktop.get("Cpu") if desktop.get("Cpu") is not None else vm.cpu
+    ram = memory_gb(desktop.get("Memory"))
     if ram is not None:
         vm.ram = ram
-    if properties.get("RootVolumeSizeGib"):
-        vm.system_disk = properties["RootVolumeSizeGib"]
-    if properties.get("UserVolumeSizeGib"):
-        vm.data_disk = properties["UserVolumeSizeGib"]
-    if workspace.get("IpAddress"):
-        vm.private_ip = workspace["IpAddress"]
 
-    bundle_id = workspace.get("BundleId")
-    if bundle_id:
-        profile = VMProfile.objects.filter(instance_type_code=bundle_id).first()
+    system_disk = disk_gb(desktop, "SYSTEM")
+    data_disk = disk_gb(desktop, "DATA")
+    if system_disk is not None:
+        vm.system_disk = system_disk
+    if data_disk is not None:
+        vm.data_disk = data_disk
+
+    private_ip = desktop.get("NetworkInterfaceIp")
+    if private_ip:
+        vm.private_ip = private_ip
+
+    desktop_type = desktop.get("DesktopType")
+    if desktop_type:
+        profile = VMProfile.objects.filter(instance_type_code=desktop_type).first()
         if profile:
             vm.current_profile = profile
 
-    username = workspace.get("UserName") or ""
-    matched = Profile.objects.filter(eds_end_user_id=username).select_related("user").first()
-    if matched is None and username:
-        account = User.objects.filter(username=username).first()
-        if account is not None:
-            vm.user = account
-    if matched is not None:
-        vm.user = matched.user
+    end_user_ids = desktop.get("EndUserIds") or []
+    if isinstance(end_user_ids, str):
+        end_user_ids = [end_user_ids]
+    profile = Profile.objects.filter(eds_end_user_id__in=end_user_ids).select_related("user").first()
+    if profile:
+        vm.user = profile.user
 
     vm.save()
     return vm
@@ -326,21 +327,14 @@ def write_log(request, vm, action, details=""):
     )
 
 
-def operate_desktop(request, vm, action, workspace_action, next_status, time_field):
+def operate_desktop(request, vm, action, ecd_action, next_status, time_field):
     if not vm.vm_id:
-        raise CloudApiError("This desktop has no WorkSpace ID yet.")
-    argument = "StartWorkspaceRequests" if workspace_action == "start_workspaces" else "StopWorkspaceRequests"
-    if workspace_action == "reboot_workspaces":
-        argument = "RebootWorkspaceRequests"
+        raise AlibabaApiError("This desktop has no Alibaba desktop ID yet.")
     try:
-        _client, payload = call_workspaces(workspace_action, **{argument: [{"WorkspaceId": vm.vm_id}]})
-    except CloudApiError as exc:
+        call_ecd(ecd_action, {"DesktopId.1": vm.vm_id})
+    except AlibabaApiError as exc:
         write_log(request, vm, "API Error", f"{exc.code}: {exc}")
         raise
-    error = failed_request(payload)
-    if error:
-        write_log(request, vm, "API Error", f"{error.code}: {error}")
-        raise error
     vm.status = next_status
     if time_field == "last_start_time":
         vm.last_start_time = datetime.now(timezone.utc)
@@ -353,34 +347,43 @@ def operate_desktop(request, vm, action, workspace_action, next_status, time_fie
 
 def connection_ticket(vm):
     if not vm.vm_id:
-        raise CloudApiError("This desktop has no WorkSpace ID yet.")
-    directory_id = vm.directory_id or DIRECTORY_ID
-    if not directory_id or directory_id == "xxxx":
-        raise CloudApiError("This desktop has no WorkSpaces directory ID.")
-    _client, directories = call_workspaces("describe_workspace_directories", DirectoryIds=[directory_id])
-    found = directories.get("Directories") or []
-    if not found or not found[0].get("RegistrationCode"):
-        raise CloudApiError("AWS did not return a WorkSpaces registration code.")
-    _client, described = call_workspaces("describe_workspaces", WorkspaceIds=[vm.vm_id])
-    spaces = described.get("Workspaces") or []
-    username = spaces[0].get("UserName") if spaces else ""
-    code = found[0]["RegistrationCode"]
-    return (
-        "Amazon WorkSpaces\n"
-        "Registration code: {}\n"
-        "Username: {}\n"
-        "Install the Amazon WorkSpaces client, enter the registration code, then sign in with the directory password.\n"
-        "Client download: https://clients.amazonworkspaces.com/\n"
-    ).format(code, username or "-")
+        raise AlibabaApiError("This desktop has no Alibaba desktop ID yet.")
+    if vm.status != "Running":
+        raise AlibabaApiError("The desktop must be Running before a connection ticket can be issued.")
+
+    extra = {"DesktopId": vm.vm_id}
+    end_user_id = ""
+    if vm.user_id:
+        profile = Profile.objects.filter(user_id=vm.user_id).first()
+        if profile and profile.eds_end_user_id:
+            end_user_id = profile.eds_end_user_id
+    if end_user_id:
+        extra["EndUserId"] = end_user_id
+
+    task_id = ""
+    for _ in range(8):
+        params = dict(extra)
+        if task_id:
+            params["TaskId"] = task_id
+        payload = call_ecd("GetConnectionTicket", params)
+        status = payload.get("TaskStatus")
+        ticket = payload.get("Ticket")
+        if status == "FINISHED" and ticket:
+            return ticket
+        if status == "FAILED":
+            raise AlibabaApiError(payload.get("TaskMessage") or "Failed to get a connection ticket.")
+        task_id = payload.get("TaskId") or task_id
+        time.sleep(1)
+    raise AlibabaApiError("The connection ticket is still being prepared. Try again in a moment.")
 
 
-def run_desktop_action(request, pk, action, workspace_action, next_status, time_field):
+def run_desktop_action(request, pk, action, ecd_action, next_status, time_field):
     vm = get_object_or_404(VirtualMachine, pk=pk)
     if not can_operate(request.user, vm):
         return JsonResponse({"detail": "You cannot operate this desktop."}, status=403)
     try:
-        operate_desktop(request, vm, action, workspace_action, next_status, time_field)
-    except CloudApiError as exc:
+        operate_desktop(request, vm, action, ecd_action, next_status, time_field)
+    except AlibabaApiError as exc:
         return JsonResponse({"detail": str(exc), "code": exc.code}, status=502)
     return JsonResponse(desktop_payload(vm))
 
@@ -397,7 +400,7 @@ def desktop_list(request):
 def desktop_sync(request):
     try:
         desktops = describe_desktops()
-    except CloudApiError as exc:
+    except AlibabaApiError as exc:
         return JsonResponse({"detail": str(exc), "code": exc.code}, status=502)
 
     saved = []
@@ -411,16 +414,16 @@ def desktop_sync(request):
 @require_POST
 @login_required_json
 def desktop_start(request, pk):
-    return run_desktop_action(request, pk, "Start", "start_workspaces", "Starting", "last_start_time")
+    return run_desktop_action(request, pk, "Start", "StartDesktops", "Starting", "last_start_time")
 
 
 @require_POST
 @login_required_json
 def desktop_stop(request, pk):
-    return run_desktop_action(request, pk, "Stop", "stop_workspaces", "Stopping", "last_stop_time")
+    return run_desktop_action(request, pk, "Stop", "StopDesktops", "Stopping", "last_stop_time")
 
 
 @require_POST
 @login_required_json
 def desktop_restart(request, pk):
-    return run_desktop_action(request, pk, "Restart", "reboot_workspaces", "Starting", "last_start_time")
+    return run_desktop_action(request, pk, "Restart", "RebootDesktops", "Starting", "last_start_time")

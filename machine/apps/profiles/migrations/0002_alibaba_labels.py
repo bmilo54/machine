@@ -13,6 +13,6 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='profile',
             name='eds_end_user_id',
-            field=models.CharField(blank=True, help_text='WorkSpaces directory username used when assigning a desktop', max_length=128, null=True, unique=True, verbose_name='Directory username'),
+            field=models.CharField(blank=True, help_text='Alibaba EDS end user ID used when assigning a desktop', max_length=128, null=True, unique=True, verbose_name='EDS End User ID'),
         ),
     ]

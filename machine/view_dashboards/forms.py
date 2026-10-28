@@ -24,12 +24,6 @@ class DashboardLoginForm(AuthenticationForm):
 
 
 class DesktopCreateForm(forms.ModelForm):
-    directory_username = forms.CharField(
-        label="Directory username",
-        max_length=64,
-        help_text="Username already created in the WorkSpaces directory.",
-    )
-
     class Meta:
         model = VirtualMachine
         fields = ("name", "user", "current_profile")
@@ -38,19 +32,13 @@ class DesktopCreateForm(forms.ModelForm):
         super(DesktopCreateForm, self).__init__(*args, **kwargs)
         self.fields["name"].required = True
         self.fields["name"].label = "Desktop name"
-        self.fields["name"].help_text = "Windows Server 2022 in Singapore. Billing is AutoStop, hourly while it is running."
+        self.fields["name"].help_text = "Windows 11 Pro in China (Hangzhou). Billing is pay-as-you-go."
         self.fields["user"].required = False
         self.fields["user"].queryset = User.objects.order_by("username")
-        self.fields["user"].help_text = "Optional. Assigns this desktop to a dashboard user."
+        self.fields["user"].help_text = "Optional. The desktop is assigned to this user in the dashboard."
         self.fields["current_profile"].required = False
         self.fields["current_profile"].queryset = VMProfile.objects.order_by("name")
-        self.fields["current_profile"].help_text = "Leave empty for the Standard Windows bundle, 2 vCPU and 4 GB."
-
-    def clean_directory_username(self):
-        username = self.cleaned_data["directory_username"].strip()
-        if not username or not username[0].isalpha():
-            raise forms.ValidationError("Start the directory username with a letter.")
-        return username
+        self.fields["current_profile"].help_text = "Leave empty for Enterprise Office, 6 vCPU and 12 GB."
 
     def clean_name(self):
         name = self.cleaned_data["name"].strip()

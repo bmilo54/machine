@@ -17,7 +17,7 @@ class VMProfile(TimeStampedModel):
 
     # 阿里云无影对应的实际规格代码，非常重要
     # 例如: eds.enterprise_office.2c8g
-    instance_type_code = models.CharField(verbose_name="Instance Type Code", max_length=255, blank=True, null=True, help_text="WorkSpaces bundle ID, such as wsb-xxxxxxxxx")
+    instance_type_code = models.CharField(verbose_name="Instance Type Code", max_length=255, blank=True, null=True, help_text="Alibaba ECD Actual Codes")
 
     class Meta:
         verbose_name = "VM Profile"
@@ -29,7 +29,8 @@ class VMProfile(TimeStampedModel):
 
 class VirtualMachine(TimeStampedModel):
     """
-    One Amazon WorkSpaces desktop. One desktop belongs to one user at a time.
+    核心表：对应阿里云上的无影云桌面实例。
+    直接与 User 表建立外键关系，一台桌面同一时间只归属一个用户。
     """
     user = models.ForeignKey(
         User,
@@ -40,9 +41,9 @@ class VirtualMachine(TimeStampedModel):
         related_name="virtual_machines",
     )
     name = models.CharField(verbose_name="Desktop Name", max_length=255, blank=True, null=True)
-    vm_id = models.CharField(verbose_name="VM ID", max_length=200, blank=True, null=True, unique=True, help_text="WorkSpace ID (ws-xxxxxxxxx)")
-    directory_id = models.CharField(max_length=100, help_text="WorkSpaces directory ID", blank=True)
-    region = models.CharField(max_length=50, default="ap-southeast-1")
+    vm_id = models.CharField(verbose_name="VM ID", max_length=200, blank=True, null=True, unique=True, help_text="Alibaba ECD Instance ID (ecd-xxxxxxx)")
+    directory_id = models.CharField(max_length=100, help_text="Directory ID", blank=True)
+    region = models.CharField(max_length=50, default="cn-hangzhou")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Creating")
 
     current_profile = models.ForeignKey(VMProfile, on_delete=models.SET_NULL, null=True, blank=True)

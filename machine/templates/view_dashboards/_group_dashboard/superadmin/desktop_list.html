@@ -9,7 +9,7 @@
     <div class="d-flex flex-wrap gap-2">
         <form method="post" action="{% url 'view_dashboards:desktop_sync' %}">
             {% csrf_token %}
-            <button class="btn btn-outline-dark btn-sm" type="submit">Sync from AWS</button>
+            <button class="btn btn-outline-dark btn-sm" type="submit">Sync from Alibaba</button>
         </form>
         <a class="btn btn-dark btn-sm" href="{% url 'view_dashboards:desktop_create' %}">Create cloud computer</a>
     </div>

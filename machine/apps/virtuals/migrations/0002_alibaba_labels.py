@@ -18,21 +18,21 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='virtualmachine',
             name='directory_id',
-            field=models.CharField(blank=True, help_text='WorkSpaces directory ID', max_length=100),
+            field=models.CharField(blank=True, help_text='Directory ID', max_length=100),
         ),
         migrations.AlterField(
             model_name='virtualmachine',
             name='region',
-            field=models.CharField(default='ap-southeast-1', max_length=50),
+            field=models.CharField(default='cn-hangzhou', max_length=50),
         ),
         migrations.AlterField(
             model_name='virtualmachine',
             name='vm_id',
-            field=models.CharField(blank=True, help_text='WorkSpace ID (ws-xxxxxxxxx)', max_length=200, null=True, unique=True, verbose_name='VM ID'),
+            field=models.CharField(blank=True, help_text='Alibaba ECD Instance ID (ecd-xxxxxxx)', max_length=200, null=True, unique=True, verbose_name='VM ID'),
         ),
         migrations.AlterField(
             model_name='vmprofile',
             name='instance_type_code',
-            field=models.CharField(blank=True, help_text='WorkSpaces bundle ID, such as wsb-xxxxxxxxx', max_length=255, null=True, verbose_name='Instance Type Code'),
+            field=models.CharField(blank=True, help_text='Alibaba ECD Actual Codes', max_length=255, null=True, verbose_name='Instance Type Code'),
         ),
     ]
