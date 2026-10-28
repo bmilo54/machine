@@ -26,11 +26,12 @@
             </form>
         {% endif %}
         <a class="btn-table-action" href="{% url 'view_dashboards:desktop_update' desktop.pk %}">Edit</a>
+        <a class="btn btn-outline-danger btn-sm" href="{% url 'view_dashboards:desktop_delete' desktop.pk %}">Delete</a>
         <a class="btn-table-action" href="{% url 'view_dashboards:desktop_list' %}">Back to list</a>
     </div>
 </div>
 {% if not desktop.vm_id %}
-<p class="text-muted-green">Save an Alibaba desktop ID before starting, stopping, or connecting this desktop.</p>
+<p class="text-muted-green">Sync from AWS before starting, stopping, or connecting this desktop.</p>
 {% endif %}
 
 <div class="row g-4">

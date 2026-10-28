@@ -1,0 +1,46 @@
+{% extends "view_dashboards/base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Delete desktop</h1>
+        <p class="page-subtitle">
+            {% if desktop.vm_id %}
+                Confirm to remove this computer from Amazon WorkSpaces and from the dashboard.
+            {% else %}
+                This desktop has no WorkSpace. Confirm to remove the dashboard record.
+            {% endif %}
+        </p>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">{{ desktop.name|default:"Untitled" }}</h2>
+    </div>
+    <dl class="row mb-0">
+        <dt class="col-sm-4">Cloud ID</dt>
+        <dd class="col-sm-8">{{ desktop.vm_id|default:"No cloud ID yet" }}</dd>
+        <dt class="col-sm-4">Status</dt>
+        <dd class="col-sm-8">{{ desktop.get_status_display }}</dd>
+        <dt class="col-sm-4">Assigned user</dt>
+        <dd class="col-sm-8">{{ desktop.user|default:"Unassigned" }}</dd>
+        <dt class="col-sm-4">Profile</dt>
+        <dd class="col-sm-8">{{ desktop.current_profile|default:"-" }}</dd>
+        <dt class="col-sm-4">CPU / RAM</dt>
+        <dd class="col-sm-8">{{ desktop.cpu|default:"-" }} cores / {{ desktop.ram|default:"-" }} GB</dd>
+        <dt class="col-sm-4">Disks</dt>
+        <dd class="col-sm-8">System {{ desktop.system_disk }} GB · Data {{ desktop.data_disk }} GB</dd>
+        <dt class="col-sm-4">Region</dt>
+        <dd class="col-sm-8">{{ desktop.region }}</dd>
+        <dt class="col-sm-4">Directory</dt>
+        <dd class="col-sm-8">{{ desktop.directory_id|default:"-" }}</dd>
+    </dl>
+    <form method="post" class="d-flex gap-2 mt-4">
+        {% csrf_token %}
+        {{ form }}
+        <button class="btn btn-outline-danger" type="submit">Delete</button>
+        <a class="btn btn-outline-secondary" href="{% url 'view_dashboards:desktop_detail' desktop.pk %}">Cancel</a>
+    </form>
+</div>
+{% endblock content %}

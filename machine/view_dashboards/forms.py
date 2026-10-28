@@ -23,6 +23,44 @@ class DashboardLoginForm(AuthenticationForm):
         })
 
 
+class DesktopCreateForm(forms.ModelForm):
+    directory_username = forms.CharField(
+        label="Directory username",
+        max_length=64,
+        help_text="Username already created in the WorkSpaces directory.",
+    )
+
+    class Meta:
+        model = VirtualMachine
+        fields = ("name", "user", "current_profile")
+
+    def __init__(self, *args, **kwargs):
+        super(DesktopCreateForm, self).__init__(*args, **kwargs)
+        self.fields["name"].required = True
+        self.fields["name"].label = "Desktop name"
+        self.fields["name"].help_text = "Windows Server 2022 in Singapore. Billing is AutoStop, hourly while it is running."
+        self.fields["user"].required = False
+        self.fields["user"].queryset = User.objects.order_by("username")
+        self.fields["user"].help_text = "Optional. Assigns this desktop to a dashboard user."
+        self.fields["current_profile"].required = False
+        self.fields["current_profile"].queryset = VMProfile.objects.order_by("name")
+        self.fields["current_profile"].help_text = "Leave empty for the Standard Windows bundle, 2 vCPU and 4 GB."
+
+    def clean_directory_username(self):
+        username = self.cleaned_data["directory_username"].strip()
+        if not username or not username[0].isalpha():
+            raise forms.ValidationError("Start the directory username with a letter.")
+        return username
+
+    def clean_name(self):
+        name = self.cleaned_data["name"].strip()
+        if len(name) > 64:
+            raise forms.ValidationError("Use 64 characters or fewer.")
+        if name.lower().startswith(("http://", "https://")) or not name[0].isalpha():
+            raise forms.ValidationError("Start the name with a letter.")
+        return name
+
+
 class VirtualMachineForm(forms.ModelForm):
     class Meta:
         model = VirtualMachine

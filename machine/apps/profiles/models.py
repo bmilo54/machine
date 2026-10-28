@@ -6,17 +6,16 @@ from core.abstract_models import TimeStampedModel
 
 class Profile(TimeStampedModel):
     """
-    Django 用户与阿里云无影终端用户的对应关系。
-    分配桌面时, API 使用 eds_end_user_id, 而不是 Django 用户名。
+    Links a dashboard user to a WorkSpaces directory username.
     """
     user = models.OneToOneField(User, on_delete=models.CASCADE, verbose_name="User", related_name="profile")
     eds_end_user_id = models.CharField(
-        verbose_name="EDS End User ID",
+        verbose_name="Directory username",
         max_length=128,
         unique=True,
         null=True,
         blank=True,
-        help_text="Alibaba EDS end user ID used when assigning a desktop",
+        help_text="WorkSpaces directory username used when assigning a desktop",
     )
 
     class Meta:

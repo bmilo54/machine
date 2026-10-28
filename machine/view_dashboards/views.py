@@ -1,8 +1,7 @@
-import base64
 import logging
 
 from django.shortcuts import get_object_or_404
-from django.views.generic.edit import CreateView, FormView, UpdateView
+from django.views.generic.edit import CreateView, FormView, UpdateView, DeleteView
 from django.views.generic.base import RedirectView, TemplateView
 from django.views.generic import DetailView, ListView, View
 
@@ -15,6 +14,7 @@ from django.views.decorators.debug import sensitive_post_parameters
 from django.http import HttpResponseRedirect, HttpResponse, JsonResponse
 from django.contrib import messages
 from django.db.models import Count, Q
+from django.conf import settings
 from django.contrib.auth import login, logout, authenticate
 
 from apps.profiles.models import Profile
@@ -22,13 +22,16 @@ from apps.virtuals.models import ActivityLog, VMProfile, VirtualMachine
 from core.mixins import DashboardMixin, GroupRequiredMixin
 from view_api.views import (
     AlibabaApiError,
+    REGION_ID,
     apply_desktop,
     connection_ticket,
+    create_cloud_desktop,
+    delete_cloud_desktop,
     describe_desktops,
     operate_desktop,
     write_log,
 )
-from .forms import DashboardLoginForm, UserProfileForm, VMProfileForm, VirtualMachineForm
+from .forms import DashboardLoginForm, DesktopCreateForm, UserProfileForm, VMProfileForm, VirtualMachineForm
 
 class LoginView(FormView):
     form_class = DashboardLoginForm
@@ -219,20 +222,38 @@ class DashboardFormMixin(DashboardMixin):
 class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
     group_required = ['superadmin']
     model = VirtualMachine
-    form_class = VirtualMachineForm
-    page_subtitle = 'Add a desktop record. The Alibaba desktop ID can stay empty until sync is available.'
+    form_class = DesktopCreateForm
+    page_subtitle = 'Creates a Windows desktop in Amazon WorkSpaces. Billing is hourly while the desktop is running.'
     cancel_url_name = 'view_dashboards:desktop_list'
 
     def get_context_data(self, **kwargs):
         context = super(DesktopCreateView, self).get_context_data(**kwargs)
-        context['page_title'] = 'Add desktop'
+        context['page_title'] = 'Create cloud computer'
         context['main_nav'] = 'desktops'
+        context['submit_label'] = 'Create cloud computer'
         return context
 
     def form_valid(self, form):
         vm = form.save(commit=False)
+        try:
+            created = create_cloud_desktop(
+                vm.name,
+                vm.current_profile,
+                form.cleaned_data["directory_username"],
+            )
+        except AlibabaApiError as exc:
+            form.add_error(None, str(exc))
+            return self.form_invalid(form)
+
+        vm.vm_id = created["vm_id"]
+        vm.cpu = created["cpu"]
+        vm.ram = created["ram"]
+        vm.system_disk = created["system_disk"]
+        vm.data_disk = created["data_disk"]
+        vm.status = "Creating"
+        vm.region = REGION_ID
+        vm.directory_id = settings.DIRECTORY_ID if settings.DIRECTORY_ID != "xxxx" else ""
         vm.created_by = self.request.user
-        apply_profile_defaults(vm)
         vm.save()
         self.object = vm
         log_desktop(
@@ -240,9 +261,12 @@ class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
             vm,
             'Assign' if vm.user_id else None,
             new_value=str(vm.user or ''),
-            details='Created desktop',
+            details='Created an Amazon WorkSpace, AutoStop hourly billing',
         )
-        messages.success(self.request, 'Desktop saved.')
+        messages.success(
+            self.request,
+            'AWS is creating this desktop. Billing is hourly while it is running. Sync from AWS to refresh the status.',
+        )
         return HttpResponseRedirect(self.get_success_url())
 
     def get_success_url(self):
@@ -388,7 +412,7 @@ class UserProfileCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
     group_required = ['superadmin']
     model = Profile
     form_class = UserProfileForm
-    page_subtitle = 'Link a Django user to an Alibaba end user ID.'
+    page_subtitle = 'Link a dashboard user to a WorkSpaces directory username.'
     cancel_url_name = 'view_dashboards:user_profile_list'
 
     def get_context_data(self, **kwargs):
@@ -413,7 +437,7 @@ class UserProfileUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
     group_required = ['superadmin']
     model = Profile
     form_class = UserProfileForm
-    page_subtitle = 'Update the Alibaba end user ID for this account.'
+    page_subtitle = 'Update the WorkSpaces directory username for this account.'
     cancel_url_name = 'view_dashboards:user_profile_list'
 
     def get_context_data(self, **kwargs):
@@ -453,9 +477,9 @@ class ActivityLogListView(GroupRequiredMixin, DashboardMixin, ListView):
 
 
 POWER_ACTIONS = {
-    "start": ("Start", "StartDesktops", "Starting", "last_start_time"),
-    "stop": ("Stop", "StopDesktops", "Stopping", "last_stop_time"),
-    "restart": ("Restart", "RebootDesktops", "Starting", "last_start_time"),
+    "start": ("Start", "start_workspaces", "Starting", "last_start_time"),
+    "stop": ("Stop", "stop_workspaces", "Stopping", "last_stop_time"),
+    "restart": ("Restart", "reboot_workspaces", "Starting", "last_start_time"),
 }
 
 
@@ -472,8 +496,45 @@ class DesktopSyncView(GroupRequiredMixin, DashboardMixin, View):
         for desktop in desktops:
             if apply_desktop(desktop):
                 saved += 1
-        messages.success(request, "Synced {} desktop(s) from Alibaba.".format(saved))
+        messages.success(request, "Synced {} desktop(s) from AWS.".format(saved))
         return HttpResponseRedirect(reverse("view_dashboards:desktop_list"))
+
+
+class DesktopDeleteView(GroupRequiredMixin, DashboardMixin, DeleteView):
+    group_required = ['superadmin']
+    model = VirtualMachine
+    template_name = "view_dashboards/_group_dashboard/superadmin/desktop_delete.html"
+    context_object_name = "desktop"
+    success_url = reverse_lazy("view_dashboards:desktop_list")
+
+    def get_queryset(self):
+        return VirtualMachine.objects.select_related("user", "current_profile")
+
+    def get_context_data(self, **kwargs):
+        context = super(DesktopDeleteView, self).get_context_data(**kwargs)
+        context["page_title"] = "Delete desktop"
+        context["main_nav"] = "desktops"
+        return context
+
+    def form_valid(self, form):
+        vm = self.object
+        removed_from_cloud = bool(vm.vm_id)
+        if vm.vm_id:
+            try:
+                delete_cloud_desktop(vm.vm_id)
+            except AlibabaApiError as exc:
+                code = (exc.code or "").lower()
+                message = str(exc).lower()
+                missing = "notfound" in code or "not found" in message or "not exist" in message
+                if not missing:
+                    messages.error(self.request, str(exc))
+                    return HttpResponseRedirect(reverse("view_dashboards:desktop_delete", args=[vm.pk]))
+                removed_from_cloud = False
+        if removed_from_cloud:
+            messages.success(self.request, "Desktop removed from AWS and this dashboard.")
+        else:
+            messages.success(self.request, "Desktop removed from this dashboard.")
+        return super(DesktopDeleteView, self).form_valid(form)
 
 
 class DesktopPowerView(GroupRequiredMixin, DashboardMixin, View):
@@ -508,12 +569,9 @@ class DesktopConnectView(GroupRequiredMixin, DashboardMixin, View):
             messages.error(request, str(exc))
             return HttpResponseRedirect(detail_url)
 
-        try:
-            content = base64.b64decode(ticket, validate=True)
-        except (ValueError, TypeError):
-            content = ticket.encode("utf-8")
-        filename = "{}.ica".format(vm.vm_id or "desktop")
-        response = HttpResponse(content, content_type="application/octet-stream")
+        content = ticket.encode("utf-8")
+        filename = "{}-connect.txt".format(vm.vm_id or "desktop")
+        response = HttpResponse(content, content_type="text/plain")
         response["Content-Disposition"] = 'attachment; filename="{}"'.format(filename)
-        write_log(request, vm, "Connect", "Downloaded connection ticket")
+        write_log(request, vm, "Connect", "Downloaded WorkSpaces connection details")
         return response

@@ -9,9 +9,9 @@
     <div class="d-flex flex-wrap gap-2">
         <form method="post" action="{% url 'view_dashboards:desktop_sync' %}">
             {% csrf_token %}
-            <button class="btn btn-outline-dark btn-sm" type="submit">Sync from Alibaba</button>
+            <button class="btn btn-outline-dark btn-sm" type="submit">Sync from AWS</button>
         </form>
-        <a class="btn btn-dark btn-sm" href="{% url 'view_dashboards:desktop_create' %}">Add desktop</a>
+        <a class="btn btn-dark btn-sm" href="{% url 'view_dashboards:desktop_create' %}">Create cloud computer</a>
     </div>
 </div>
 
@@ -55,6 +55,9 @@
                         </a>
                         <a class="table-btn-action" href="{% url 'view_dashboards:desktop_update' desktop.pk %}" title="Edit">
                             <i class="bi bi-pencil"></i>
+                        </a>
+                        <a class="table-btn-action" href="{% url 'view_dashboards:desktop_delete' desktop.pk %}" title="Delete">
+                            <i class="bi bi-trash"></i>
                         </a>
                     </td>
                 </tr>
