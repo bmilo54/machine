@@ -4,10 +4,14 @@
 <div class="page-header">
     <div>
         <h1 class="page-title">Users</h1>
-        <p class="page-subtitle">Django users linked to an Alibaba end user ID.</p>
+        <p class="page-subtitle">Dashboard users and their Wuying logins in Alibaba.</p>
     </div>
     <a class="btn btn-dark btn-sm" href="{% url 'view_dashboards:user_profile_create' %}">Add user profile</a>
 </div>
+
+{% if wuying_error %}
+<div class="alert alert-warning">Could not load Wuying users from Alibaba: {{ wuying_error }}</div>
+{% endif %}
 
 <div class="table-card-custom">
     <div class="table-responsive">
@@ -16,7 +20,9 @@
                 <tr>
                     <th>User</th>
                     <th>Email</th>
-                    <th>EDS end user ID</th>
+                    <th>Wuying username</th>
+                    <th>Wuying password</th>
+                    <th>Wuying status</th>
                     <th class="text-center">Action</th>
                 </tr>
             </thead>
@@ -25,20 +31,110 @@
                 <tr>
                     <td>{{ profile.user.username }}</td>
                     <td>{{ profile.user.email|default:"-" }}</td>
-                    <td>{{ profile.eds_end_user_id|default:"-" }}</td>
+                    <td>
+                        {% if profile.eds_end_user_id %}
+                            <span class="d-inline-flex align-items-center gap-1">
+                                {{ profile.eds_end_user_id }}
+                                <button class="table-btn-action border-0 bg-transparent" type="button" title="Copy username" data-copy-text="{{ profile.eds_end_user_id }}">
+                                    <i class="bi bi-clipboard"></i>
+                                </button>
+                            </span>
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if profile.wuying_password %}
+                            <span class="d-inline-flex align-items-center gap-1">
+                                <code>{{ profile.wuying_password }}</code>
+                                <button class="table-btn-action border-0 bg-transparent" type="button" title="Copy password" data-copy-text="{{ profile.wuying_password }}">
+                                    <i class="bi bi-clipboard"></i>
+                                </button>
+                            </span>
+                        {% else %}
+                            Not stored
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if profile.wuying %}
+                            {{ profile.wuying.status }}
+                        {% elif not profile.eds_end_user_id %}
+                            Not linked
+                        {% elif wuying_error %}
+                            -
+                        {% else %}
+                            Not found in Alibaba
+                        {% endif %}
+                    </td>
                     <td class="text-center">
                         <a class="table-btn-action" href="{% url 'view_dashboards:user_profile_update' profile.pk %}" title="Edit">
                             <i class="bi bi-pencil"></i>
+                        </a>
+                        {% if profile.eds_end_user_id %}
+                        <a class="table-btn-action" href="{% url 'view_dashboards:user_profile_password' profile.pk %}" title="Set Wuying password">
+                            <i class="bi bi-key"></i>
+                        </a>
+                        {% endif %}
+                        <a class="table-btn-action" href="{% url 'view_dashboards:user_profile_delete' profile.pk %}" title="Delete">
+                            <i class="bi bi-trash"></i>
                         </a>
                     </td>
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="4" class="text-muted-green">No user profiles yet.</td>
+                    <td colspan="6" class="text-muted-green">No user profiles yet.</td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
     </div>
 </div>
+
+{% if unlinked_wuying_users %}
+<div class="page-header mt-4">
+    <div>
+        <h2 class="page-title fs-5">Wuying users not linked</h2>
+        <p class="page-subtitle">These exist in Alibaba. Add a user profile and choose "Link a Wuying user that already exists".</p>
+    </div>
+</div>
+
+<div class="table-card-custom">
+    <div class="table-responsive">
+        <table class="table-custom">
+            <thead>
+                <tr>
+                    <th>Wuying username</th>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for wuying_user in unlinked_wuying_users %}
+                <tr>
+                    <td>{{ wuying_user.end_user_id }}</td>
+                    <td>{{ wuying_user.name|default:"-" }}</td>
+                    <td>{{ wuying_user.email|default:"-" }}</td>
+                    <td>{{ wuying_user.status }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
 {% endblock content %}
+
+{% block extra_js %}
+<script>
+document.querySelectorAll("[data-copy-text]").forEach(function (button) {
+    button.addEventListener("click", function () {
+        var original = button.innerHTML;
+        navigator.clipboard.writeText(button.dataset.copyText).then(function () {
+            button.innerHTML = '<i class="bi bi-check2"></i>';
+            setTimeout(function () { button.innerHTML = original; }, 1500);
+        });
+    });
+});
+</script>
+{% endblock extra_js %}

@@ -15,6 +15,28 @@
     </div>
 </div>
 
+<div class="card mb-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
+        <div>
+            <h2 class="card-title mb-2">How users sign in</h2>
+            <dl class="row mb-0">
+                <dt class="col-sm-4">Download Wuying app</dt>
+                <dd class="col-sm-8"><a href="{{ wuying_download_url }}" target="_blank" rel="noopener">{{ wuying_download_url }}</a></dd>
+                <dt class="col-sm-4">Or use the browser</dt>
+                <dd class="col-sm-8"><a href="{{ wuying_web_url }}" target="_blank" rel="noopener">{{ wuying_web_url }}</a></dd>
+                <dt class="col-sm-4">Office network ID</dt>
+                <dd class="col-sm-8">{{ office_network_id|default:"Set DIRECTORY_ID in local settings" }}</dd>
+            </dl>
+            <p class="text-muted-green small mb-0 mt-2">
+                In the app, choose 企业版 &amp; 商业版 (Enterprise), enter the office network ID, then the Wuying username and password.
+            </p>
+        </div>
+        <button class="btn btn-outline-dark btn-sm" type="button" data-copy-signin data-username="">
+            Copy sign-in info
+        </button>
+    </div>
+</div>
+
 <div class="table-card-custom">
     <div class="table-responsive">
         <table class="table-custom">
@@ -50,6 +72,13 @@
                     </td>
                     <td>{{ desktop.region }}</td>
                     <td class="text-center">
+                        {% if desktop.user.profile.eds_end_user_id %}
+                        <button class="table-btn-action border-0 bg-transparent" type="button" title="Copy sign-in info for {{ desktop.user }}"
+                                data-copy-signin data-username="{{ desktop.user.profile.eds_end_user_id }}"
+                                data-password="{{ desktop.user.profile.wuying_password }}">
+                            <i class="bi bi-clipboard"></i>
+                        </button>
+                        {% endif %}
                         <a class="table-btn-action" href="{% url 'view_dashboards:desktop_detail' desktop.pk %}" title="View details">
                             <i class="bi bi-eye"></i>
                         </a>
@@ -86,3 +115,34 @@
     {% endif %}
 </div>
 {% endblock content %}
+
+{% block extra_js %}
+{{ wuying_download_url|json_script:"wuying-download-url" }}
+{{ wuying_web_url|json_script:"wuying-web-url" }}
+{{ office_network_id|json_script:"wuying-office-network-id" }}
+<script>
+document.querySelectorAll("[data-copy-signin]").forEach(function (button) {
+    button.addEventListener("click", function () {
+        var read = function (id) { return JSON.parse(document.getElementById(id).textContent); };
+        var lines = [
+            "Your cloud desktop is ready.",
+            "1. Download the Wuying app: " + read("wuying-download-url"),
+            "   Or open it in a browser: " + read("wuying-web-url"),
+            "2. Choose 企业版 & 商业版 (Enterprise).",
+            "3. Office network ID: " + read("wuying-office-network-id"),
+        ];
+        if (button.dataset.username) {
+            lines.push("4. Username: " + button.dataset.username);
+            lines.push("5. Password: " + (button.dataset.password || "the one your admin gave you."));
+        } else {
+            lines.push("4. Sign in with the username and password your admin gave you.");
+        }
+        var original = button.innerHTML;
+        navigator.clipboard.writeText(lines.join("\n")).then(function () {
+            button.innerHTML = button.dataset.username ? '<i class="bi bi-check2"></i>' : "Copied";
+            setTimeout(function () { button.innerHTML = original; }, 1500);
+        });
+    });
+});
+</script>
+{% endblock extra_js %}

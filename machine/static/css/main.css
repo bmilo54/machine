@@ -2396,6 +2396,12 @@ span.flatpickr-weekday {
     border-color: var(--brand-forest-medium);
 }
 
+.table-btn-action.bg-transparent:hover {
+    background-color: var(--sys-green-bg) !important;
+    border-color: transparent;
+    color: var(--brand-forest-medium);
+}
+
 .table-btn-action.delete:hover {
     background-color: var(--sys-red);
     color: #FFFFFF;

@@ -15,10 +15,11 @@
             <thead>
                 <tr>
                     <th>Name</th>
+                    <th>Desktop type</th>
                     <th>CPU</th>
                     <th>RAM</th>
+                    <th>GPU</th>
                     <th>Disks</th>
-                    <th>Instance type</th>
                     <th class="text-center">Action</th>
                 </tr>
             </thead>
@@ -26,10 +27,11 @@
                 {% for profile in vm_profiles %}
                 <tr>
                     <td>{{ profile.name|default:"Untitled" }}</td>
+                    <td>{{ profile.desktop_type_group|default:"Not set" }}</td>
                     <td>{{ profile.cpu|default:"-" }}</td>
                     <td>{{ profile.ram|default:"-" }} GB</td>
-                    <td>{{ profile.system_disk|default:"-" }} / {{ profile.data_disk|default:"-" }} GB</td>
-                    <td>{{ profile.instance_type_code|default:"-" }}</td>
+                    <td>{% if profile.gpu %}{{ profile.gpu }} GB{% else %}None{% endif %}</td>
+                    <td>{{ profile.system_disk|default:"-" }} / {{ profile.data_disk|default:"0" }} GB</td>
                     <td class="text-center">
                         <a class="table-btn-action" href="{% url 'view_dashboards:vm_profile_update' profile.pk %}" title="Edit">
                             <i class="bi bi-pencil"></i>
@@ -38,7 +40,7 @@
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="6" class="text-muted-green">No VM profiles yet.</td>
+                    <td colspan="7" class="text-muted-green">No VM profiles yet.</td>
                 </tr>
                 {% endfor %}
             </tbody>

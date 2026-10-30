@@ -1,7 +1,7 @@
 from django.contrib.auth.models import User
 from django.db import models
 
-from apps.virtuals.choices import ACTION_CHOICES, STATUS_CHOICES
+from apps.virtuals.choices import ACTION_CHOICES, DESKTOP_TYPE_SPECS, STATUS_CHOICES
 from core.abstract_models import TimeStampedModel
 
 
@@ -12,6 +12,7 @@ class VMProfile(TimeStampedModel):
     name = models.CharField(verbose_name="Settings Name", max_length=255, blank=True, null=True, unique=True)
     cpu = models.IntegerField(verbose_name="CPU Cores", blank=True, null=True)
     ram = models.IntegerField(verbose_name="RAM (GB)", blank=True, null=True)
+    gpu = models.IntegerField(verbose_name="GPU Memory (GB)", blank=True, null=True)
     system_disk = models.IntegerField(verbose_name="System Disk (GB)", blank=True, null=True)
     data_disk = models.IntegerField(verbose_name="Data Disk (GB)", blank=True, null=True)
 
@@ -25,6 +26,11 @@ class VMProfile(TimeStampedModel):
 
     def __str__(self):
         return self.name or "VM Profile"
+
+    @property
+    def desktop_type_group(self):
+        spec = DESKTOP_TYPE_SPECS.get(self.instance_type_code or "")
+        return spec["group"] if spec else ""
 
 
 class VirtualMachine(TimeStampedModel):

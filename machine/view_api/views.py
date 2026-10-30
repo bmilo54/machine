@@ -16,6 +16,7 @@ from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.profiles.models import Profile
+from apps.virtuals.choices import DATA_DISK_SIZES, DESKTOP_TYPE_SPECS, SYSTEM_DISK_SIZES
 from apps.virtuals.models import ActivityLog, VMProfile, VirtualMachine
 
 ACCESS_KEY_ID = settings.ACCESS_KEY_ID
@@ -24,7 +25,13 @@ REGION_ID = settings.REGION_ID
 DIRECTORY_ID = settings.DIRECTORY_ID
 
 ECD_VERSION = "2020-09-30"
+EDS_USER_VERSION = "2021-03-08"
+WUYING_DOWNLOAD_URL = "https://www.alibabacloud.com/en/product/cloud-desktop/download-client"
+WUYING_WEB_URL = "https://workspace.alibabacloud.com"
+# International-site accounts keep Wuying users in Singapore; China-site accounts use eds-user.cn-shanghai.aliyuncs.com.
+EDS_USER_HOST = getattr(settings, "EDS_USER_HOST", "eds-user.ap-southeast-1.aliyuncs.com")
 WINDOWS_11_PRO_IMAGE_ID = "desktopimage-windows-11-64-asp"
+WINDOWS_11_PRO_GPU_IMAGE_ID = "desktopimage-windows-11-64-asp-gpu"
 DEFAULT_DESKTOP_TYPE = "eds.enterprise_office.6c12g"
 DEFAULT_POLICY_GROUP_ID = "system-all-enabled-policy"
 STATUS_FROM_CLOUD = {
@@ -73,10 +80,18 @@ def percent_encode(value):
 
 
 def call_ecd(action, extra=None):
+    return call_alibaba("ecd", ECD_VERSION, action, extra)
+
+
+def call_eds_user(action, extra=None):
+    return call_alibaba("eds-user", EDS_USER_VERSION, action, extra, host=EDS_USER_HOST)
+
+
+def call_alibaba(service, version, action, extra=None, host=None):
     params = {
         "Action": action,
         "Format": "JSON",
-        "Version": ECD_VERSION,
+        "Version": version,
         "AccessKeyId": ACCESS_KEY_ID,
         "SignatureMethod": "HMAC-SHA1",
         "Timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -100,7 +115,8 @@ def call_ecd(action, extra=None):
     query = "&".join(
         f"{percent_encode(key)}={percent_encode(params[key])}" for key in sorted(params)
     )
-    request = Request(f"https://ecd.{REGION_ID}.aliyuncs.com/?{query}")
+    host = host or f"{service}.{REGION_ID}.aliyuncs.com"
+    request = Request(f"https://{host}/?{query}")
 
     try:
         with urlopen(request, timeout=20) as response:
@@ -123,39 +139,80 @@ def call_ecd(action, extra=None):
     return payload
 
 
-def desktop_type_resources(desktop_type):
-    matched = None
-    for part in str(desktop_type or "").split("."):
-        if "c" in part and part.endswith("g"):
-            matched = part
-    if not matched or "c" not in matched:
-        return None, None
-    cpu_text, ram_text = matched[:-1].split("c", 1)
-    if cpu_text.isdigit() and ram_text.isdigit():
-        return int(cpu_text), int(ram_text)
-    return None, None
+def list_bundles():
+    bundles = []
+    next_token = ""
+    for _ in range(20):
+        extra = {"MaxResults": 100}
+        if next_token:
+            extra["NextToken"] = next_token
+        payload = call_ecd("DescribeBundles", extra)
+        bundles.extend(payload.get("Bundles") or [])
+        next_token = payload.get("NextToken") or ""
+        if not next_token:
+            break
+    return bundles
+
+
+def bundle_disks(bundle):
+    disks = {}
+    for disk in bundle.get("Disks") or []:
+        if disk.get("DiskSize") not in (None, ""):
+            disks[disk.get("DiskType")] = int(disk["DiskSize"])
+    return disks
 
 
 def resolve_desktop_spec(profile):
     desktop_type = DEFAULT_DESKTOP_TYPE
-    if profile and profile.instance_type_code:
-        desktop_type = profile.instance_type_code.strip() or DEFAULT_DESKTOP_TYPE
-    elif profile and profile.cpu == 8 and profile.ram == 16:
-        desktop_type = "eds.enterprise_office.8c16g"
+    if profile and profile.instance_type_code and profile.instance_type_code.strip():
+        desktop_type = profile.instance_type_code.strip()
+    spec = DESKTOP_TYPE_SPECS.get(desktop_type)
+    if not spec:
+        raise AlibabaApiError(
+            "This profile has no desktop type Alibaba sells. Edit the profile and pick a desktop type."
+        )
 
-    cpu, ram = desktop_type_resources(desktop_type)
-    if profile and cpu is None:
-        cpu = profile.cpu
-    if profile and ram is None:
-        ram = profile.ram
+    system_disk = int(profile.system_disk or 80) if profile else 80
+    data_disk = int(profile.data_disk or 0) if profile else 0
+    return desktop_type, spec, system_disk, data_disk
 
-    system_disk = 80
-    data_disk = 0
-    if profile and profile.system_disk and profile.system_disk >= 80:
-        system_disk = profile.system_disk
-    if profile and profile.data_disk and profile.data_disk >= 40:
-        data_disk = profile.data_disk
-    return desktop_type, cpu, ram, system_disk, data_disk
+
+def find_windows_bundle(bundles, image_id, desktop_type, system_disk, data_disk):
+    for bundle in bundles:
+        if bundle.get("ImageId") != image_id:
+            continue
+        if bundle.get("DesktopType") != desktop_type:
+            continue
+        disks = bundle_disks(bundle)
+        if disks.get("SYSTEM") == system_disk and disks.get("DATA", 0) == data_disk:
+            return bundle.get("BundleId") or ""
+    return ""
+
+
+def ensure_windows_bundle(bundles, image_id, desktop_type, system_disk, data_disk):
+    bundle_id = find_windows_bundle(bundles, image_id, desktop_type, system_disk, data_disk)
+    if bundle_id:
+        return bundle_id
+
+    payload = call_ecd(
+        "CreateBundle",
+        {
+            "BundleName": "win11-{}-s{}-d{}".format(
+                desktop_type.split(".", 1)[-1].replace(".", "-"),
+                system_disk,
+                data_disk,
+            ),
+            "ImageId": image_id,
+            "DesktopType": desktop_type,
+            "RootDiskSizeGib": system_disk,
+            "UserDiskSizeGib.1": data_disk,
+            "Language": "zh-CN",
+        },
+    )
+    bundle_id = (payload.get("BundleId") or "").strip()
+    if not bundle_id:
+        raise AlibabaApiError("Alibaba did not return a Windows 11 template ID.")
+    return bundle_id
 
 
 def desktop_id_from(payload):
@@ -174,17 +231,30 @@ def create_cloud_desktop(name, profile=None, end_user_id=""):
     if not DIRECTORY_ID or DIRECTORY_ID == "xxxx":
         raise AlibabaApiError("Set DIRECTORY_ID in local settings to the Hangzhou office network.")
 
-    desktop_type, cpu, ram, system_disk, data_disk = resolve_desktop_spec(profile)
+    desktop_type, spec, system_disk, data_disk = resolve_desktop_spec(profile)
+    if system_disk not in SYSTEM_DISK_SIZES:
+        raise AlibabaApiError(
+            "This profile asks for a {} GB system disk. Edit the profile and pick 80 or 120 GB.".format(
+                system_disk,
+            )
+        )
+    if data_disk not in DATA_DISK_SIZES:
+        raise AlibabaApiError(
+            "This profile asks for a {} GB data disk. Edit the profile and pick 0, 100, 200, 500, or 1000 GB.".format(
+                data_disk,
+            )
+        )
+
+    image_id = WINDOWS_11_PRO_GPU_IMAGE_ID if spec["gpu"] else WINDOWS_11_PRO_IMAGE_ID
+    bundle_id = ensure_windows_bundle(list_bundles(), image_id, desktop_type, system_disk, data_disk)
+
     extra = {
         "DesktopName": name,
         "Amount": 1,
         "OfficeSiteId": DIRECTORY_ID,
         "PolicyGroupId": DEFAULT_POLICY_GROUP_ID,
         "ChargeType": "PostPaid",
-        "DesktopAttachment.ImageId": WINDOWS_11_PRO_IMAGE_ID,
-        "DesktopAttachment.SystemDiskSize": system_disk,
-        "DesktopAttachment.DataDiskSize": data_disk,
-        "DesktopAttachment.DesktopType": desktop_type,
+        "BundleId": bundle_id,
     }
     if end_user_id:
         extra["EndUserId.1"] = end_user_id
@@ -192,8 +262,8 @@ def create_cloud_desktop(name, profile=None, end_user_id=""):
     payload = call_ecd("CreateDesktops", extra)
     return {
         "vm_id": desktop_id_from(payload),
-        "cpu": cpu,
-        "ram": ram,
+        "cpu": spec["cpu"],
+        "ram": spec["ram"],
         "system_disk": system_disk,
         "data_disk": data_disk,
     }
@@ -203,6 +273,90 @@ def delete_cloud_desktop(vm_id):
     if not vm_id:
         return
     call_ecd("DeleteDesktops", {"DesktopId.1": vm_id})
+
+
+def assign_desktop_user(vm_id, end_user_id=""):
+    extra = {"DesktopId": vm_id}
+    if end_user_id:
+        extra["EndUserId.1"] = end_user_id
+    call_ecd("ModifyEntitlement", extra)
+
+
+WUYING_USER_STATUS = {0: "Active", 9: "Locked"}
+
+
+def describe_wuying_users():
+    users = {}
+    next_token = ""
+    for _ in range(20):
+        extra = {"MaxResults": 100}
+        if next_token:
+            extra["NextToken"] = next_token
+        payload = call_eds_user("DescribeUsers", extra)
+        for user in payload.get("Users") or []:
+            end_user_id = user.get("EndUserId")
+            if not end_user_id:
+                continue
+            status = user.get("Status")
+            try:
+                status = int(status)
+            except (TypeError, ValueError):
+                pass
+            users[end_user_id] = {
+                "end_user_id": end_user_id,
+                "email": user.get("Email") or "",
+                "phone": user.get("Phone") or "",
+                "name": user.get("RealNickName") or "",
+                "status": WUYING_USER_STATUS.get(status, str(status) if status not in (None, "") else "Unknown"),
+            }
+        next_token = payload.get("NextToken") or ""
+        if not next_token:
+            break
+    return users
+
+
+def remove_wuying_user(end_user_id):
+    if not end_user_id or end_user_id not in describe_wuying_users():
+        return
+    try:
+        payload = call_eds_user("RemoveUsers", {"Users.1": end_user_id})
+    except AlibabaApiError as exc:
+        if "NotFound" in (exc.code or ""):
+            return
+        raise
+    result = payload.get("RemoveUsersResult") or {}
+    failed = result.get("FailedUsers") or []
+    if failed:
+        first = failed[0]
+        raise AlibabaApiError(
+            first.get("ErrorMessage") or "Alibaba did not delete the Wuying user.",
+            first.get("ErrorCode") or "",
+        )
+
+
+def change_wuying_password(end_user_id, new_password):
+    call_eds_user("ChangeUserPassword", {"EndUserId": end_user_id, "NewPassword": new_password})
+
+
+def create_wuying_user(end_user_id, email, password, display_name=""):
+    extra = {
+        "Users.1.EndUserId": end_user_id,
+        "Users.1.Email": email,
+        "Users.1.OwnerType": "CreateFromManager",
+        "Users.1.Password": password,
+        "Password": password,
+    }
+    if display_name:
+        extra["Users.1.RealNickName"] = display_name
+    payload = call_eds_user("CreateUsers", extra)
+    result = payload.get("CreateResult") or {}
+    failed = result.get("FailedUsers") or []
+    if failed or payload.get("AllSucceed") is False:
+        first = failed[0] if failed else {}
+        raise AlibabaApiError(
+            first.get("ErrorMessage") or "Alibaba did not create the Wuying user.",
+            first.get("ErrorCode") or "",
+        )
 
 
 def describe_desktops():

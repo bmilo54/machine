@@ -18,6 +18,12 @@ class Profile(TimeStampedModel):
         blank=True,
         help_text="Alibaba EDS end user ID used when assigning a desktop",
     )
+    wuying_password = models.CharField(
+        verbose_name="Wuying password",
+        max_length=15,
+        blank=True,
+        help_text="Last password the dashboard set in Alibaba, so an admin can send it to the user.",
+    )
 
     class Meta:
         verbose_name = "Profile"

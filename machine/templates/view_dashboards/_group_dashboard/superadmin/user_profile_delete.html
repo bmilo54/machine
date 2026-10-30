@@ -1,0 +1,57 @@
+{% extends "view_dashboards/base.html" %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Delete user profile</h1>
+        <p class="page-subtitle">
+            Confirm to remove this user profile. The dashboard login account itself is not deleted.
+        </p>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">{{ user_profile.user.username }}</h2>
+    </div>
+    <dl class="row mb-0">
+        <dt class="col-sm-4">Email</dt>
+        <dd class="col-sm-8">{{ user_profile.user.email|default:"-" }}</dd>
+        <dt class="col-sm-4">Wuying username</dt>
+        <dd class="col-sm-8">{{ user_profile.eds_end_user_id|default:"Not linked" }}</dd>
+        <dt class="col-sm-4">Assigned desktops</dt>
+        <dd class="col-sm-8">
+            {% for desktop in assigned_desktops %}
+                {{ desktop.name|default:"Untitled" }}{% if not forloop.last %}, {% endif %}
+            {% empty %}
+                None
+            {% endfor %}
+        </dd>
+    </dl>
+
+    {% if assigned_desktops %}
+    <div class="alert alert-warning mt-3 mb-0">
+        This user still has desktops. If you delete the Wuying user, they can no longer sign in to those desktops.
+    </div>
+    {% endif %}
+
+    <form method="post" class="mt-4">
+        {% csrf_token %}
+        {% if form.non_field_errors %}
+            <div class="alert alert-danger">{{ form.non_field_errors }}</div>
+        {% endif %}
+        {% if user_profile.eds_end_user_id %}
+            <div class="mb-3">
+                <label class="form-label" for="{{ form.wuying_action.id_for_label }}">{{ form.wuying_action.label }}</label>
+                {{ form.wuying_action }}
+            </div>
+        {% else %}
+            <input type="hidden" name="wuying_action" value="keep">
+        {% endif %}
+        <div class="d-flex gap-2">
+            <button class="btn btn-outline-danger" type="submit">Delete</button>
+            <a class="btn btn-outline-secondary" href="{% url 'view_dashboards:user_profile_list' %}">Cancel</a>
+        </div>
+    </form>
+</div>
+{% endblock content %}
