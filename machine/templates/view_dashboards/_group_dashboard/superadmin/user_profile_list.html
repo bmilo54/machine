@@ -4,9 +4,9 @@
 <div class="page-header">
     <div>
         <h1 class="page-title">Users</h1>
-        <p class="page-subtitle">Dashboard users and their Wuying logins in Alibaba.</p>
+        <p class="page-subtitle">Dashboard accounts and their Wuying logins. Create them here instead of the admin site.</p>
     </div>
-    <a class="btn btn-dark btn-sm" href="{% url 'view_dashboards:user_profile_create' %}">Add user profile</a>
+    <a class="btn btn-dark btn-sm" href="{% url 'view_dashboards:user_profile_create' %}">Add user</a>
 </div>
 
 {% if wuying_error %}
@@ -27,15 +27,20 @@
                 </tr>
             </thead>
             <tbody>
-                {% for profile in user_profiles %}
+                {% for account in accounts %}
                 <tr>
-                    <td>{{ profile.user.username }}</td>
-                    <td>{{ profile.user.email|default:"-" }}</td>
                     <td>
-                        {% if profile.eds_end_user_id %}
+                        <div class="table-user-name">{{ account.username }}</div>
+                        {% if account.get_full_name %}
+                            <div class="table-user-sub">{{ account.get_full_name }}</div>
+                        {% endif %}
+                    </td>
+                    <td>{{ account.email|default:"-" }}</td>
+                    <td>
+                        {% if account.profile.eds_end_user_id %}
                             <span class="d-inline-flex align-items-center gap-1">
-                                {{ profile.eds_end_user_id }}
-                                <button class="table-btn-action border-0 bg-transparent" type="button" title="Copy username" data-copy-text="{{ profile.eds_end_user_id }}">
+                                {{ account.profile.eds_end_user_id }}
+                                <button class="table-btn-action border-0 bg-transparent" type="button" title="Copy username" data-copy-text="{{ account.profile.eds_end_user_id }}">
                                     <i class="bi bi-clipboard"></i>
                                 </button>
                             </span>
@@ -44,10 +49,10 @@
                         {% endif %}
                     </td>
                     <td>
-                        {% if profile.wuying_password %}
+                        {% if account.profile.wuying_password %}
                             <span class="d-inline-flex align-items-center gap-1">
-                                <code>{{ profile.wuying_password }}</code>
-                                <button class="table-btn-action border-0 bg-transparent" type="button" title="Copy password" data-copy-text="{{ profile.wuying_password }}">
+                                <code>{{ account.profile.wuying_password }}</code>
+                                <button class="table-btn-action border-0 bg-transparent" type="button" title="Copy password" data-copy-text="{{ account.profile.wuying_password }}">
                                     <i class="bi bi-clipboard"></i>
                                 </button>
                             </span>
@@ -56,9 +61,9 @@
                         {% endif %}
                     </td>
                     <td>
-                        {% if profile.wuying %}
-                            {{ profile.wuying.status }}
-                        {% elif not profile.eds_end_user_id %}
+                        {% if account.wuying %}
+                            {{ account.wuying.status }}
+                        {% elif not account.profile.eds_end_user_id %}
                             Not linked
                         {% elif wuying_error %}
                             -
@@ -67,22 +72,24 @@
                         {% endif %}
                     </td>
                     <td class="text-center">
-                        <a class="table-btn-action" href="{% url 'view_dashboards:user_profile_update' profile.pk %}" title="Edit">
+                        <a class="table-btn-action" href="{% url 'view_dashboards:user_profile_update' account.pk %}" title="Edit">
                             <i class="bi bi-pencil"></i>
                         </a>
-                        {% if profile.eds_end_user_id %}
-                        <a class="table-btn-action" href="{% url 'view_dashboards:user_profile_password' profile.pk %}" title="Set Wuying password">
+                        {% if account.profile.eds_end_user_id %}
+                        <a class="table-btn-action" href="{% url 'view_dashboards:user_profile_password' account.pk %}" title="Set Wuying password">
                             <i class="bi bi-key"></i>
                         </a>
                         {% endif %}
-                        <a class="table-btn-action" href="{% url 'view_dashboards:user_profile_delete' profile.pk %}" title="Delete">
+                        {% if account.pk != request.user.pk %}
+                        <a class="table-btn-action" href="{% url 'view_dashboards:user_profile_delete' account.pk %}" title="Delete">
                             <i class="bi bi-trash"></i>
                         </a>
+                        {% endif %}
                     </td>
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="6" class="text-muted-green">No user profiles yet.</td>
+                    <td colspan="6" class="text-muted-green">No users yet.</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -94,7 +101,7 @@
 <div class="page-header mt-4">
     <div>
         <h2 class="page-title fs-5">Wuying users not linked</h2>
-        <p class="page-subtitle">These exist in Alibaba. Add a user profile and choose "Link a Wuying user that already exists".</p>
+        <p class="page-subtitle">These exist in Alibaba. Add a user and choose "Link a Wuying user that already exists".</p>
     </div>
 </div>
 

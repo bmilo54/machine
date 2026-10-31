@@ -6,6 +6,9 @@ from datetime import timedelta
 from django import forms
 from django.contrib.auth.forms import AuthenticationForm
 from django.contrib.auth.models import User
+from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.validators import UnicodeUsernameValidator as DjangoUnicodeUsernameValidator
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 
 from apps.profiles.models import Profile
@@ -28,6 +31,10 @@ from apps.virtuals.choices import (
     valid_grown_disk,
 )
 from apps.virtuals.models import ActivityLog, VMProfile, VirtualMachine
+
+
+def end_user_queryset():
+    return User.objects.filter(groups__isnull=True).distinct().order_by("username")
 
 class DashboardLoginForm(AuthenticationForm):
     username = forms.CharField(label="Username")
@@ -58,7 +65,7 @@ class DesktopCreateForm(forms.ModelForm):
         self.fields["name"].label = "Desktop name"
         self.fields["name"].help_text = "Windows 11 Pro in China (Hangzhou). Billing is pay-as-you-go."
         self.fields["user"].required = False
-        self.fields["user"].queryset = User.objects.order_by("username")
+        self.fields["user"].queryset = end_user_queryset()
         self.fields["user"].help_text = "Optional. The desktop is assigned to this user in the dashboard."
         self.fields["current_profile"].required = False
         self.fields["current_profile"].queryset = VMProfile.objects.order_by("name")
@@ -180,7 +187,10 @@ class VirtualMachineForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super(VirtualMachineForm, self).__init__(*args, **kwargs)
-        self.fields['user'].queryset = User.objects.order_by('username')
+        users = end_user_queryset()
+        if self.instance.pk and self.instance.user_id and self.instance.user_id not in users.values_list("pk", flat=True):
+            users = User.objects.filter(pk=self.instance.user_id) | users
+        self.fields['user'].queryset = users.order_by("username")
         self.fields['current_profile'].queryset = VMProfile.objects.order_by('name')
 
 
@@ -291,19 +301,162 @@ class VMProfileForm(forms.ModelForm):
         return profile
 
 
-class UserProfileForm(forms.ModelForm):
+WUYING_MODE_CHOICES = [
+    ("create", "Create a new Wuying user in Alibaba"),
+    ("link", "Link a Wuying user that already exists"),
+]
+
+
+class DashboardUserCreateForm(forms.Form):
+    username = forms.CharField(
+        label="Username",
+        max_length=150,
+        help_text="Used to sign in to this dashboard. 150 characters or fewer.",
+    )
+    first_name = forms.CharField(label="First name", required=False, max_length=150)
+    last_name = forms.CharField(label="Last name", required=False, max_length=150)
+    email = forms.EmailField(
+        label="Email",
+        required=False,
+        help_text="Alibaba sends desktop notices here when you create a new Wuying user.",
+    )
+    password = forms.CharField(
+        label="Dashboard password",
+        widget=forms.PasswordInput(render_value=False),
+        help_text="Password for this dashboard. It is separate from the Wuying password.",
+    )
+    confirm_password = forms.CharField(
+        label="Type the dashboard password again",
+        widget=forms.PasswordInput(render_value=False),
+    )
+    wuying_mode = forms.ChoiceField(
+        label="Wuying account",
+        choices=WUYING_MODE_CHOICES,
+        initial="create",
+    )
+    eds_end_user_id = forms.CharField(
+        label="Wuying username",
+        max_length=24,
+        help_text="3 to 24 lowercase letters, digits, or underscores. The user signs in to Wuying with this.",
+    )
+    wuying_password = forms.CharField(
+        label="Wuying password",
+        required=False,
+        widget=forms.PasswordInput(render_value=False),
+        help_text="Leave empty and the dashboard makes a 12 character password. It is shown on the Users page.",
+    )
+    display_name = forms.CharField(label="Wuying display name", required=False, max_length=64)
+
+    def clean_username(self):
+        username = self.cleaned_data["username"].strip()
+        DjangoUnicodeUsernameValidator()(username)
+        if User.objects.filter(username=username).exists():
+            raise forms.ValidationError("A user with this username already exists.")
+        return username
+
+    def clean_eds_end_user_id(self):
+        end_user_id = (self.cleaned_data.get("eds_end_user_id") or "").strip()
+        if not re.fullmatch(r"[a-z0-9_]{3,24}", end_user_id):
+            raise forms.ValidationError("Use 3 to 24 lowercase letters, digits, or underscores.")
+        if Profile.objects.filter(eds_end_user_id=end_user_id).exists():
+            raise forms.ValidationError("This Wuying username is already linked to a dashboard user.")
+        return end_user_id
+
+    def clean(self):
+        cleaned = super(DashboardUserCreateForm, self).clean()
+        password = cleaned.get("password") or ""
+        if password and password != cleaned.get("confirm_password"):
+            self.add_error("confirm_password", "The two dashboard passwords do not match.")
+        if password:
+            try:
+                validate_password(password, User(username=cleaned.get("username") or "", email=cleaned.get("email") or ""))
+            except DjangoValidationError as exc:
+                self.add_error("password", exc.messages)
+        if cleaned.get("wuying_mode") != "create":
+            return cleaned
+        if not cleaned.get("email"):
+            self.add_error("email", "Alibaba needs an email for a new Wuying user.")
+        if not cleaned.get("wuying_password"):
+            cleaned["wuying_password"] = generate_wuying_password()
+        elif not wuying_password_ok(cleaned["wuying_password"]):
+            self.add_error("wuying_password", WUYING_PASSWORD_RULE)
+        return cleaned
+
+
+class DashboardUserUpdateForm(forms.ModelForm):
+    password = forms.CharField(
+        label="New dashboard password",
+        required=False,
+        widget=forms.PasswordInput(render_value=False),
+        help_text="Leave blank to keep the current password.",
+    )
+    confirm_password = forms.CharField(
+        label="Type the new dashboard password again",
+        required=False,
+        widget=forms.PasswordInput(render_value=False),
+    )
+    eds_end_user_id = forms.CharField(
+        label="Wuying username",
+        required=False,
+        max_length=24,
+        help_text="3 to 24 lowercase letters, digits, or underscores. Leave empty if this account has no Wuying login.",
+    )
+
     class Meta:
-        model = Profile
-        fields = ('user', 'eds_end_user_id')
+        model = User
+        fields = ("username", "first_name", "last_name", "email")
 
     def __init__(self, *args, **kwargs):
-        super(UserProfileForm, self).__init__(*args, **kwargs)
-        users = User.objects.order_by('username')
-        if self.instance.pk:
-            self.fields['user'].disabled = True
-        else:
-            users = users.filter(profile__isnull=True)
-        self.fields['user'].queryset = users
+        super(DashboardUserUpdateForm, self).__init__(*args, **kwargs)
+        profile = Profile.objects.filter(user=self.instance).first()
+        if profile and profile.eds_end_user_id:
+            self.fields["eds_end_user_id"].initial = profile.eds_end_user_id
+
+    def clean_username(self):
+        username = self.cleaned_data["username"].strip()
+        DjangoUnicodeUsernameValidator()(username)
+        if User.objects.exclude(pk=self.instance.pk).filter(username=username).exists():
+            raise forms.ValidationError("A user with this username already exists.")
+        return username
+
+    def clean_eds_end_user_id(self):
+        end_user_id = (self.cleaned_data.get("eds_end_user_id") or "").strip()
+        if not end_user_id:
+            return ""
+        if not re.fullmatch(r"[a-z0-9_]{3,24}", end_user_id):
+            raise forms.ValidationError("Use 3 to 24 lowercase letters, digits, or underscores.")
+        if Profile.objects.exclude(user=self.instance).filter(eds_end_user_id=end_user_id).exists():
+            raise forms.ValidationError("This Wuying username is already linked to another user.")
+        return end_user_id
+
+    def clean(self):
+        cleaned = super(DashboardUserUpdateForm, self).clean()
+        password = cleaned.get("password") or ""
+        if password or cleaned.get("confirm_password"):
+            if password != cleaned.get("confirm_password"):
+                self.add_error("confirm_password", "The two dashboard passwords do not match.")
+            elif password:
+                try:
+                    validate_password(password, self.instance)
+                except DjangoValidationError as exc:
+                    self.add_error("password", exc.messages)
+        return cleaned
+
+    def save(self, commit=True):
+        user = super(DashboardUserUpdateForm, self).save(commit=False)
+        password = self.cleaned_data.get("password") or ""
+        if password:
+            user.set_password(password)
+        if commit:
+            user.save()
+            end_user_id = self.cleaned_data.get("eds_end_user_id") or None
+            profile = Profile.objects.filter(user=user).first()
+            if profile:
+                profile.eds_end_user_id = end_user_id
+                profile.save(update_fields=["eds_end_user_id", "modified"])
+            elif end_user_id:
+                Profile.objects.create(user=user, eds_end_user_id=end_user_id)
+        return user
 
 
 WUYING_PASSWORD_RULE = "Use at least 10 characters with 3 of: uppercase, lowercase, digits, symbols. No spaces."
@@ -338,63 +491,6 @@ class UserProfileDeleteForm(forms.Form):
         initial="remove",
         widget=forms.Select(attrs={"class": "form-select"}),
     )
-
-
-WUYING_MODE_CHOICES = [
-    ("create", "Create a new Wuying user in Alibaba"),
-    ("link", "Link a Wuying user that already exists"),
-]
-
-
-class UserProfileCreateForm(UserProfileForm):
-    wuying_mode = forms.ChoiceField(
-        label="Wuying account",
-        choices=WUYING_MODE_CHOICES,
-        initial="create",
-    )
-    email = forms.EmailField(
-        label="Email",
-        required=False,
-        help_text="Alibaba sends desktop notices here. Leave empty to use the dashboard user's email.",
-    )
-    password = forms.CharField(
-        label="Wuying password",
-        required=False,
-        widget=forms.PasswordInput(render_value=False),
-        help_text="Leave empty and the dashboard makes a 12 character password. It is shown on the Users page.",
-    )
-    display_name = forms.CharField(label="Display name", required=False, max_length=64)
-
-    field_order = ('user', 'wuying_mode', 'eds_end_user_id', 'email', 'password', 'display_name')
-
-    def __init__(self, *args, **kwargs):
-        super(UserProfileCreateForm, self).__init__(*args, **kwargs)
-        self.fields['eds_end_user_id'].required = True
-        self.fields['eds_end_user_id'].label = "Wuying username"
-        self.fields['eds_end_user_id'].help_text = "3 to 24 lowercase letters, digits, or underscores. The user signs in to Wuying with this."
-
-    def clean_eds_end_user_id(self):
-        end_user_id = (self.cleaned_data.get('eds_end_user_id') or '').strip()
-        if not re.fullmatch(r'[a-z0-9_]{3,24}', end_user_id):
-            raise forms.ValidationError("Use 3 to 24 lowercase letters, digits, or underscores.")
-        return end_user_id
-
-    def clean(self):
-        cleaned_data = super(UserProfileCreateForm, self).clean()
-        if cleaned_data.get('wuying_mode') != 'create':
-            return cleaned_data
-
-        user = cleaned_data.get('user')
-        if not cleaned_data.get('email') and user and user.email:
-            cleaned_data['email'] = user.email
-        if not cleaned_data.get('email'):
-            self.add_error('email', "Alibaba needs an email for a new Wuying user.")
-
-        if not cleaned_data.get('password'):
-            cleaned_data['password'] = generate_wuying_password()
-        elif not wuying_password_ok(cleaned_data['password']):
-            self.add_error('password', WUYING_PASSWORD_RULE)
-        return cleaned_data
 
 
 class WuyingPasswordForm(forms.Form):

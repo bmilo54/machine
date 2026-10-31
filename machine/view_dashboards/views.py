@@ -19,6 +19,7 @@ from django.contrib import messages
 from django.db.models import Count, Q
 from django.conf import settings
 from django.contrib.auth import login, logout, authenticate
+from django.contrib.auth.models import User
 
 from apps.profiles.models import Profile
 from apps.virtuals.choices import DESKTOP_TYPE_SPECS, spec_summary
@@ -49,9 +50,10 @@ from .forms import (
     DashboardLoginForm,
     DesktopCreateForm,
     DesktopSpecForm,
-    UserProfileCreateForm,
+    DashboardUserCreateForm,
+    DashboardUserUpdateForm,
     UserProfileDeleteForm,
-    UserProfileForm,
+    end_user_queryset,
     VMProfileForm,
     VirtualMachineForm,
     WuyingPasswordForm,
@@ -732,13 +734,13 @@ class VMProfileUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
 
 class UserProfileListView(GroupRequiredMixin, DashboardMixin, ListView):
     group_required = ['superadmin']
-    model = Profile
+    model = User
     template_name = 'view_dashboards/_group_dashboard/superadmin/user_profile_list.html'
-    context_object_name = 'user_profiles'
+    context_object_name = 'accounts'
     paginate_by = 20
 
     def get_queryset(self):
-        return Profile.objects.select_related('user').order_by('user__username')
+        return end_user_queryset().select_related('profile')
 
     def get_context_data(self, **kwargs):
         context = super(UserProfileListView, self).get_context_data(**kwargs)
@@ -752,102 +754,115 @@ class UserProfileListView(GroupRequiredMixin, DashboardMixin, ListView):
         except AlibabaApiError as exc:
             context['wuying_error'] = str(exc)
 
-        for profile in context['user_profiles']:
-            profile.wuying = wuying_users.get(profile.eds_end_user_id or '')
-        linked = set(Profile.objects.exclude(eds_end_user_id__isnull=True).values_list('eds_end_user_id', flat=True))
+        for account in context['accounts']:
+            try:
+                profile = account.profile
+            except Profile.DoesNotExist:
+                profile = None
+            end_user_id = profile.eds_end_user_id if profile else ''
+            account.wuying = wuying_users.get(end_user_id or '')
+        linked = set(Profile.objects.exclude(eds_end_user_id__isnull=True).exclude(eds_end_user_id='').values_list('eds_end_user_id', flat=True))
         context['unlinked_wuying_users'] = [
             user for end_user_id, user in sorted(wuying_users.items()) if end_user_id not in linked
         ]
         return context
 
 
-class UserProfileCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
+class UserProfileCreateView(GroupRequiredMixin, DashboardFormMixin, FormView):
     group_required = ['superadmin']
-    model = Profile
-    form_class = UserProfileCreateForm
-    page_subtitle = 'Creates the Wuying login in Alibaba, or links one that already exists.'
+    form_class = DashboardUserCreateForm
+    page_subtitle = 'Creates the dashboard account here, then the Wuying login in Alibaba. The admin site is not required.'
     cancel_url_name = 'view_dashboards:user_profile_list'
 
     def get_context_data(self, **kwargs):
         context = super(UserProfileCreateView, self).get_context_data(**kwargs)
-        context['page_title'] = 'Add user profile'
+        context['page_title'] = 'Add user'
         context['main_nav'] = 'users'
+        context['submit_label'] = 'Create user'
         return context
 
     def form_valid(self, form):
-        profile = form.save(commit=False)
-        end_user_id = profile.eds_end_user_id
+        data = form.cleaned_data
+        user = User.objects.create_user(
+            username=data['username'],
+            email=data.get('email') or '',
+            password=data['password'],
+            first_name=data.get('first_name') or '',
+            last_name=data.get('last_name') or '',
+        )
+        end_user_id = data['eds_end_user_id']
         try:
-            if form.cleaned_data['wuying_mode'] == 'create':
+            if data['wuying_mode'] == 'create':
                 create_wuying_user(
                     end_user_id,
-                    form.cleaned_data['email'],
-                    form.cleaned_data['password'],
-                    form.cleaned_data.get('display_name') or profile.user.get_full_name(),
+                    data['email'],
+                    data['wuying_password'],
+                    data.get('display_name') or user.get_full_name(),
                 )
             elif end_user_id not in describe_wuying_users():
+                user.delete()
                 form.add_error('eds_end_user_id', 'Alibaba has no Wuying user with this username.')
                 return self.form_invalid(form)
         except AlibabaApiError as exc:
-            log_desktop(self.request, None, "API Error", details=str(exc), desktop_name=end_user_id or "")
+            user.delete()
+            log_desktop(self.request, None, "API Error", details=str(exc), desktop_name=user.username)
             form.add_error(None, str(exc))
             return self.form_invalid(form)
 
-        if form.cleaned_data['wuying_mode'] == 'create':
-            if not profile.user.email:
-                profile.user.email = form.cleaned_data['email']
-                profile.user.save(update_fields=['email'])
-            profile.wuying_password = form.cleaned_data['password']
-        profile.created_by = self.request.user
+        profile = Profile(user=user, eds_end_user_id=end_user_id, created_by=self.request.user)
+        if data['wuying_mode'] == 'create':
+            profile.wuying_password = data['wuying_password']
         profile.save()
-        self.object = profile
-        if form.cleaned_data['wuying_mode'] == 'create':
+        if data['wuying_mode'] == 'create':
             log_desktop(
                 self.request, None, "Create user",
                 new_value=end_user_id,
-                details="Created the Wuying user in Alibaba and linked it.",
-                desktop_name=profile.user.username,
+                details="Created the dashboard account and the Wuying user in Alibaba.",
+                desktop_name=user.username,
             )
-            messages.success(self.request, 'Wuying user created in Alibaba and linked. They can sign in to the Wuying app now.')
+            messages.success(self.request, 'User created. They can sign in to this dashboard and to the Wuying app.')
         else:
             log_desktop(
-                self.request, None, "Update",
+                self.request, None, "Create user",
                 new_value=end_user_id,
-                details="Linked a Wuying user that already exists in Alibaba.",
-                desktop_name=profile.user.username,
+                details="Created the dashboard account and linked an existing Wuying user.",
+                desktop_name=user.username,
             )
-            messages.success(self.request, 'Wuying user linked.')
-        return HttpResponseRedirect(self.get_success_url())
-
-    def get_success_url(self):
-        return reverse('view_dashboards:user_profile_list')
+            messages.success(self.request, 'User created and linked to the existing Wuying login.')
+        return HttpResponseRedirect(reverse('view_dashboards:user_profile_list'))
 
 
 class UserProfileUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
     group_required = ['superadmin']
-    model = Profile
-    form_class = UserProfileForm
-    page_subtitle = 'Update the Alibaba end user ID for this account.'
+    model = User
+    form_class = DashboardUserUpdateForm
+
+    def get_queryset(self):
+        return end_user_queryset()
+
+    page_subtitle = 'Update this dashboard account. Leave the password blank to keep it.'
     cancel_url_name = 'view_dashboards:user_profile_list'
 
     def get_context_data(self, **kwargs):
         context = super(UserProfileUpdateView, self).get_context_data(**kwargs)
-        context['page_title'] = 'Edit user profile'
+        context['page_title'] = 'Edit user'
         context['main_nav'] = 'users'
         return context
 
     def form_valid(self, form):
-        profile = form.save(commit=False)
-        profile.modified_by = self.request.user
-        profile.save()
-        self.object = profile
+        user = form.save()
+        self.object = user
+        profile = Profile.objects.filter(user=user).first()
+        if profile:
+            profile.modified_by = self.request.user
+            profile.save(update_fields=['modified_by', 'modified'])
         log_desktop(
             self.request, None, "Update",
-            new_value=profile.eds_end_user_id or "",
-            details="Updated the user profile.",
-            desktop_name=profile.user.username,
+            new_value=profile.eds_end_user_id if profile else "",
+            details="Updated the dashboard account.",
+            desktop_name=user.username,
         )
-        messages.success(self.request, 'User profile updated.')
+        messages.success(self.request, 'User updated.')
         return HttpResponseRedirect(self.get_success_url())
 
     def get_success_url(self):
@@ -860,7 +875,8 @@ class UserProfilePasswordView(GroupRequiredMixin, DashboardFormMixin, FormView):
     cancel_url_name = 'view_dashboards:user_profile_list'
 
     def dispatch(self, request, *args, **kwargs):
-        self.profile = get_object_or_404(Profile.objects.select_related('user'), pk=kwargs['pk'])
+        self.account = get_object_or_404(end_user_queryset(), pk=kwargs['pk'])
+        self.profile = get_object_or_404(Profile.objects.select_related('user'), user=self.account)
         return super(UserProfilePasswordView, self).dispatch(request, *args, **kwargs)
 
     def get_context_data(self, **kwargs):
@@ -903,24 +919,35 @@ class UserProfilePasswordView(GroupRequiredMixin, DashboardFormMixin, FormView):
 
 class UserProfileDeleteView(GroupRequiredMixin, DashboardMixin, DeleteView):
     group_required = ['superadmin']
-    model = Profile
+    model = User
     form_class = UserProfileDeleteForm
-    template_name = 'view_dashboards/_group_dashboard/superadmin/user_profile_delete.html'
-    context_object_name = 'user_profile'
-    success_url = reverse_lazy('view_dashboards:user_profile_list')
 
     def get_queryset(self):
-        return Profile.objects.select_related('user')
+        return end_user_queryset()
+
+    template_name = 'view_dashboards/_group_dashboard/superadmin/user_profile_delete.html'
+    context_object_name = 'account'
+    success_url = reverse_lazy('view_dashboards:user_profile_list')
+
+    def dispatch(self, request, *args, **kwargs):
+        if str(kwargs.get('pk')) == str(request.user.pk):
+            messages.error(request, 'You cannot delete the account you are signed in with.')
+            return HttpResponseRedirect(reverse('view_dashboards:user_profile_list'))
+
+        return super(UserProfileDeleteView, self).dispatch(request, *args, **kwargs)
 
     def get_context_data(self, **kwargs):
         context = super(UserProfileDeleteView, self).get_context_data(**kwargs)
-        context['page_title'] = 'Delete user profile'
+        context['page_title'] = 'Delete user'
         context['main_nav'] = 'users'
-        context['assigned_desktops'] = VirtualMachine.objects.filter(user=self.object.user).order_by('name')
+        context['profile'] = Profile.objects.filter(user=self.object).first()
+        context['assigned_desktops'] = VirtualMachine.objects.filter(user=self.object).order_by('name')
+
         return context
 
     def form_valid(self, form):
-        end_user_id = self.object.eds_end_user_id
+        profile = Profile.objects.filter(user=self.object).first()
+        end_user_id = profile.eds_end_user_id if profile else ''
         remove = form.cleaned_data['wuying_action'] == 'remove' and end_user_id
         if remove:
             try:
@@ -928,20 +955,22 @@ class UserProfileDeleteView(GroupRequiredMixin, DashboardMixin, DeleteView):
             except AlibabaApiError as exc:
                 log_desktop(
                     self.request, None, "API Error", details=str(exc),
-                    desktop_name=self.object.user.username,
+                    desktop_name=self.object.username,
                 )
                 form.add_error(None, str(exc))
                 return self.form_invalid(form)
+
         log_desktop(
             self.request, None, "Delete user",
             old_value=end_user_id or "",
-            details="Removed the user profile and deleted the Wuying user in Alibaba." if remove else "Removed the user profile. The Wuying user is still in Alibaba.",
-            desktop_name=self.object.user.username,
+            details="Deleted the dashboard account and the Wuying user in Alibaba." if remove else "Deleted the dashboard account. The Wuying user is still in Alibaba.",
+            desktop_name=self.object.username,
         )
+
         if remove:
-            messages.success(self.request, 'User profile removed and Wuying user deleted in Alibaba.')
+            messages.success(self.request, 'User deleted here and in Alibaba. Assigned desktops are now unassigned.')
         else:
-            messages.success(self.request, 'User profile removed. The Wuying user is still in Alibaba.')
+            messages.success(self.request, 'User deleted. Assigned desktops are now unassigned.')
 
         return super(UserProfileDeleteView, self).form_valid(form)
 
@@ -957,6 +986,7 @@ class GuidanceView(GroupRequiredMixin, DashboardMixin, TemplateView):
         context["wuying_web_url"] = WUYING_WEB_URL
         directory_id = settings.DIRECTORY_ID
         context["office_network_id"] = directory_id if directory_id and directory_id != "xxxx" else ""
+
         return context
 
 
@@ -975,6 +1005,7 @@ class ActivityLogListView(GroupRequiredMixin, DashboardMixin, ListView):
         context["page_title"] = "Activity"
         context["selected_page"] = "activity"
         context["main_nav"] = "activity"
+
         return context
 
 
@@ -1004,8 +1035,8 @@ class DesktopProgressView(GroupRequiredMixin, DashboardMixin, View):
                 "label": vm.get_status_display(),
                 "busy": vm.status in BUSY_STATUSES,
             })
-        return JsonResponse({"desktops": rows})
 
+        return JsonResponse({"desktops": rows})
 
 class DesktopSyncView(GroupRequiredMixin, DashboardMixin, View):
     group_required = ['superadmin']
