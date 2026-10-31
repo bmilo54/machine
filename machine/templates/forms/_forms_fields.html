@@ -8,10 +8,24 @@
         <div class="col-lg-6">
             <div class="mb-20">        
                 {% if field.label %}
-                    <label class="label fs-16 mb-2">
-                        {{ field.label }}
-                        {% if field.field.required %}<span class="text-danger">*</span>{% endif %}
-                    </label>
+                    <div class="d-flex align-items-center gap-1 mb-2">
+                        <label class="label fs-16 mb-0" for="{{ field.id_for_label }}">
+                            {{ field.label }}
+                            {% if field.field.required %}<span class="text-danger">*</span>{% endif %}
+                        </label>
+                        {% if field.field.guide %}
+                            <span class="field-info" tabindex="0" aria-label="About {{ field.label }}">
+                                <i class="bi bi-info-circle" aria-hidden="true"></i>
+                                <span class="field-tip" role="tooltip">
+                                    <ul>
+                                        {% for item in field.field.guide %}
+                                            <li><strong>{{ item.title }}</strong> {{ item.text }}</li>
+                                        {% endfor %}
+                                    </ul>
+                                </span>
+                            </span>
+                        {% endif %}
+                    </div>
                 {% endif %}
 
                 {% if field.errors %}

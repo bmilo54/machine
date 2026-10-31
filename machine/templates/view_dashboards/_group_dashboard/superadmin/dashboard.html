@@ -1,4 +1,5 @@
 {% extends "view_dashboards/base.html" %}
+{% load dashboard_time %}
 
 {% block extra_css %}
 <style>
@@ -136,6 +137,15 @@
     .dash-link:hover i {
         transform: translateX(4px);
     }
+    .cost-chart {
+        width: 100%;
+        height: auto;
+    }
+    .cost-chart text {
+        fill: #6b7280;
+        font-size: 12px;
+        font-weight: 700;
+    }
     .dash-activity tbody tr {
         animation: dashFade 0.45s cubic-bezier(0.22, 1, 0.36, 1) backwards;
     }
@@ -250,6 +260,61 @@
     </div>
 </section>
 
+<section class="table-card-custom dash-enter mt-4" style="--enter: 400ms" aria-label="Cost this month">
+    <div class="table-header-control">
+        <div>
+            <h2 class="card-title mb-1">Cost used in {{ cost.month_label }}</h2>
+            <p class="text-muted-green small mb-0">Pay-as-you-go estimate from the hours each computer was on.</p>
+        </div>
+        <div class="metric-value mb-0">{{ cost.total_label }}</div>
+    </div>
+    <svg class="cost-chart" viewBox="0 0 {{ cost.chart.width }} {{ cost.chart.height }}" role="img" aria-label="Cumulative cost line chart for {{ cost.month_label }}">
+        <line x1="{{ cost.chart.left }}" y1="16" x2="{{ cost.chart.left }}" y2="{{ cost.chart.baseline }}" stroke="#e5e7eb"></line>
+        <line x1="{{ cost.chart.left }}" y1="{{ cost.chart.baseline }}" x2="624" y2="{{ cost.chart.baseline }}" stroke="#e5e7eb"></line>
+        <text x="8" y="20">{{ cost.chart.peak_label }}</text>
+        <text x="8" y="{{ cost.chart.baseline }}">$0</text>
+        <polygon points="{{ cost.chart.area }}" fill="rgba(7, 47, 31, 0.12)"></polygon>
+        <polyline points="{{ cost.chart.line }}" fill="none" stroke="#072F1F" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"></polyline>
+        {% for point in cost.chart.coords %}
+            <circle cx="{{ point.x }}" cy="{{ point.y }}" r="3.5" fill="#072F1F">
+                <title>{{ point.label }}: {{ point.cumulative_label }}</title>
+            </circle>
+            {% if point.show_label %}
+                <text x="{{ point.x }}" y="{{ cost.chart.baseline|add:18 }}" text-anchor="{% if forloop.first %}start{% elif forloop.last %}end{% else %}middle{% endif %}">{{ point.label }}</text>
+            {% endif %}
+        {% endfor %}
+    </svg>
+    <p class="text-muted-green small mb-0">
+        The line is the running total for this month. Each hour a computer is on is charged at its current hourly price.
+        Stopping it stops the compute charge. Disks can still be billed while it is off, so the Alibaba invoice can be higher.
+        {% if cost.unpriced %}{{ cost.unpriced }} desktop{{ cost.unpriced|pluralize }} still need a price. Sync from Alibaba.{% endif %}
+    </p>
+    {% if cost.rows %}
+    <div class="table-responsive mt-3">
+        <table class="table-custom">
+            <thead>
+                <tr>
+                    <th>Desktop</th>
+                    <th>Hours on</th>
+                    <th>Hourly price</th>
+                    <th>Used this month</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in cost.rows %}
+                <tr>
+                    <td><a href="{% url 'view_dashboards:desktop_detail' row.pk %}">{{ row.name }}</a></td>
+                    <td>{{ row.hours_label }}</td>
+                    <td>{{ row.hourly_label }}</td>
+                    <td>{{ row.cost_label }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
+
 <div class="row g-4 mt-1">
     <div class="col-12">
         <div class="table-card-custom dash-enter dash-activity" style="--enter: 420ms">
@@ -273,11 +338,15 @@
                     <tbody>
                         {% for log in recent_logs %}
                         <tr>
-                            <td>{{ log.created|date:"Y-m-d H:i" }}</td>
+                            <td>{{ log.created|dash_datetime }}</td>
                             <td>{{ log.actor|default:"-" }}</td>
-                            <td>{{ log.action|default:"-" }}</td>
+                            <td>{{ log.get_action_display|default:"-" }}</td>
                             <td>
-                                <a href="{% url 'view_dashboards:desktop_detail' log.virtual_machine_id %}">{{ log.virtual_machine }}</a>
+                                {% if log.virtual_machine_id %}
+                                    <a href="{% url 'view_dashboards:desktop_detail' log.virtual_machine_id %}">{{ log.subject }}</a>
+                                {% else %}
+                                    {{ log.subject }}
+                                {% endif %}
                             </td>
                         </tr>
                         {% empty %}

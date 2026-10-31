@@ -46,6 +46,7 @@
                     <th>User</th>
                     <th>Status</th>
                     <th>Spec</th>
+                    <th>Price</th>
                     <th>Region</th>
                     <th class="text-center">Action</th>
                 </tr>
@@ -58,14 +59,25 @@
                         <div class="table-user-sub">{{ desktop.vm_id|default:"No cloud ID yet" }}</div>
                     </td>
                     <td>{{ desktop.user|default:"Unassigned" }}</td>
-                    <td>
-                        <span class="badge-table {% if desktop.status == 'Running' %}success{% elif desktop.status == 'Error' %}failed{% else %}pending{% endif %}">
+                    <td data-desktop-status="{{ desktop.pk }}">
+                        <span class="badge-table {% if desktop.status == 'Running' %}success{% elif desktop.status == 'Error' %}failed{% else %}pending{% endif %}" data-desktop-badge="{{ desktop.pk }}">
                             {{ desktop.get_status_display }}
                         </span>
+                        <div class="progress mt-2" data-desktop-bar="{{ desktop.pk }}" style="height: 6px;{% if desktop.status not in busy_statuses %} display: none;{% endif %}">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%; background-color: #072F1F;"></div>
+                        </div>
                     </td>
                     <td>
                         {% if desktop.cpu or desktop.ram %}
                             {{ desktop.cpu|default:"-" }}C / {{ desktop.ram|default:"-" }}GB
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if desktop.price %}
+                            <div>${{ desktop.price.hourly|floatformat:4 }}/hour</div>
+                            <div class="table-user-sub">${{ desktop.price.monthly|floatformat:2 }} if on all month</div>
                         {% else %}
                             -
                         {% endif %}
@@ -82,6 +94,9 @@
                         <a class="table-btn-action" href="{% url 'view_dashboards:desktop_detail' desktop.pk %}" title="View details">
                             <i class="bi bi-eye"></i>
                         </a>
+                        <a class="table-btn-action" href="{% url 'view_dashboards:desktop_spec' desktop.pk %}" title="Change specifications">
+                            <i class="bi bi-sliders"></i>
+                        </a>
                         <a class="table-btn-action" href="{% url 'view_dashboards:desktop_update' desktop.pk %}" title="Edit">
                             <i class="bi bi-pencil"></i>
                         </a>
@@ -92,7 +107,7 @@
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="6" class="text-muted-green">No desktops yet.</td>
+                    <td colspan="7" class="text-muted-green">No desktops yet.</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -113,10 +128,53 @@
         {% endif %}
     </nav>
     {% endif %}
+    {% if monthly_total %}
+    <div class="p-3 text-muted-green small">
+        If every desktop on this page stays on all month, the budget is about ${{ monthly_total|floatformat:2 }}.
+        Stopping a desktop stops the computer charge. The disks are still billed.
+    </div>
+    {% endif %}
 </div>
 {% endblock content %}
 
 {% block extra_js %}
+<script>
+(function () {
+    var bars = document.querySelectorAll("[data-desktop-bar]");
+    var busy = Array.prototype.some.call(bars, function (bar) { return bar.style.display !== "none"; });
+    if (!busy) return;
+    var tries = 0;
+    function badgeClass(status) {
+        if (status === "Running") return "success";
+        if (status === "Error") return "failed";
+        return "pending";
+    }
+    function tick() {
+        fetch("{% url 'view_dashboards:desktop_progress' %}", {headers: {"Accept": "application/json"}})
+            .then(function (response) { return response.json(); })
+            .then(function (payload) {
+                var stillBusy = false;
+                (payload.desktops || []).forEach(function (row) {
+                    var badge = document.querySelector('[data-desktop-badge="' + row.id + '"]');
+                    var bar = document.querySelector('[data-desktop-bar="' + row.id + '"]');
+                    if (badge) {
+                        badge.textContent = row.label;
+                        badge.className = "badge-table " + badgeClass(row.status);
+                    }
+                    if (bar) bar.style.display = row.busy ? "" : "none";
+                    if (row.busy) stillBusy = true;
+                });
+                tries += 1;
+                if (stillBusy && tries < 150) setTimeout(tick, 8000);
+            })
+            .catch(function () {
+                if (tries < 150) setTimeout(tick, 8000);
+                tries += 1;
+            });
+    }
+    setTimeout(tick, 8000);
+})();
+</script>
 {{ wuying_download_url|json_script:"wuying-download-url" }}
 {{ wuying_web_url|json_script:"wuying-web-url" }}
 {{ office_network_id|json_script:"wuying-office-network-id" }}

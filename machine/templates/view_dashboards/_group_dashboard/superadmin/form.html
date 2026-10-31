@@ -1,5 +1,72 @@
 {% extends "view_dashboards/base.html" %}
 
+{% block extra_css %}
+<style>
+    form.card {
+        overflow: visible;
+    }
+    .field-info {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.25rem;
+        height: 1.25rem;
+        border-radius: 50%;
+        background: #DCFCE7;
+        color: #072F1F;
+        line-height: 1;
+        cursor: help;
+        outline: none;
+    }
+    .field-info:hover,
+    .field-info:focus {
+        background: #072F1F;
+        color: #ffffff;
+    }
+    .field-tip {
+        position: absolute;
+        z-index: 30;
+        top: calc(100% + 0.45rem);
+        left: 0;
+        width: 18rem;
+        padding: 0.7rem 0.8rem;
+        border-radius: 8px;
+        background: #072F1F;
+        color: #ffffff;
+        font-size: 0.8rem;
+        font-weight: 500;
+        line-height: 1.4;
+        text-align: left;
+        box-shadow: 0 8px 24px rgba(11, 19, 15, 0.18);
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+    }
+    .field-tip::before {
+        content: "";
+        position: absolute;
+        top: -5px;
+        left: 7px;
+        border-right: 5px solid transparent;
+        border-bottom: 5px solid #072F1F;
+        border-left: 5px solid transparent;
+    }
+    .field-info:hover .field-tip,
+    .field-info:focus .field-tip {
+        opacity: 1;
+        visibility: visible;
+    }
+    .field-tip ul {
+        margin: 0;
+        padding-left: 1rem;
+    }
+    .field-tip li + li {
+        margin-top: 0.35rem;
+    }
+</style>
+{% endblock extra_css %}
+
 {% block content %}
 <div class="page-header">
     <div>

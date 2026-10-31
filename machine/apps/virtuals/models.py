@@ -50,6 +50,7 @@ class VirtualMachine(TimeStampedModel):
     vm_id = models.CharField(verbose_name="VM ID", max_length=200, blank=True, null=True, unique=True, help_text="Alibaba ECD Instance ID (ecd-xxxxxxx)")
     directory_id = models.CharField(max_length=100, help_text="Directory ID", blank=True)
     region = models.CharField(max_length=50, default="cn-hangzhou")
+    desktop_type = models.CharField(max_length=128, blank=True, help_text="Alibaba desktop type, such as eds.enterprise_office.6c12g")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Creating")
 
     current_profile = models.ForeignKey(VMProfile, on_delete=models.SET_NULL, null=True, blank=True)
@@ -89,10 +90,14 @@ class ActivityLog(TimeStampedModel):
     )
     virtual_machine = models.ForeignKey(
         VirtualMachine,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
         verbose_name="Virtual Machine",
         related_name="activity_logs",
+        blank=True,
+        null=True,
     )
+    desktop_name = models.CharField(max_length=255, blank=True)
+    cloud_id = models.CharField(max_length=200, blank=True)
     action = models.CharField(max_length=20, choices=ACTION_CHOICES, blank=True, null=True)
 
     # 记录详细变更
@@ -103,4 +108,11 @@ class ActivityLog(TimeStampedModel):
     ip_address = models.GenericIPAddressField(null=True, blank=True, help_text="操作来源IP")
 
     def __str__(self):
-        return f"{self.actor} {self.action} {self.virtual_machine} at {self.created}"
+        target = self.virtual_machine or self.desktop_name or "desktop"
+        return f"{self.actor} {self.action} {target} at {self.created}"
+
+    @property
+    def subject(self):
+        if self.virtual_machine_id and self.virtual_machine.name:
+            return self.virtual_machine.name
+        return self.desktop_name or "Deleted desktop"

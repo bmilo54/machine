@@ -4,17 +4,25 @@ STATUS_CHOICES = [
     ("Starting", "Starting"),
     ("Stopping", "Stopping"),
     ("Creating", "Creating"),
+    ("Updating", "Updating"),
     ("Error", "Error"),
 ]
 
 ACTION_CHOICES = [
+    ("Create", "Create"),
     ("Start", "Start"),
     ("Stop", "Stop"),
     ("Restart", "Restart"),
     ("Assign", "Assign"),
     ("Unassign", "Unassign"),
-    ("Resize", "Resize"),
+    ("Update", "Update"),
+    ("Resize", "Change specifications"),
     ("Connect", "Connect"),
+    ("Delete", "Delete"),
+    ("Sync", "Sync"),
+    ("Create user", "Create user"),
+    ("Delete user", "Delete user"),
+    ("Set password", "Set password"),
     ("API Error", "API Error"),
 ]
 
@@ -70,17 +78,65 @@ for _group in dict.fromkeys(group for _id, group, _cpu, _ram, _gpu in DESKTOP_TY
         [(type_id, desktop_type_label(type_id)) for type_id, group, *_rest in DESKTOP_TYPES if group == _group],
     ))
 
-SYSTEM_DISK_CHOICES = [
-    (80, "80 GB"),
-    (120, "120 GB"),
-]
-SYSTEM_DISK_SIZES = [size for size, _label in SYSTEM_DISK_CHOICES]
+DISK_STEP = 10
+SYSTEM_DISK_MIN = 60
+SYSTEM_DISK_MAX = 2040
+DATA_DISK_MIN = 50
+DATA_DISK_MAX = 2040
 
-DATA_DISK_CHOICES = [
-    (0, "No data disk"),
-    (100, "100 GB"),
-    (200, "200 GB"),
-    (500, "500 GB"),
-    (1000, "1000 GB"),
-]
-DATA_DISK_SIZES = [size for size, _label in DATA_DISK_CHOICES]
+
+def desktop_type_family(type_id):
+    type_id = type_id or ""
+    if type_id.startswith("eds.graphics"):
+        return "graphics"
+    if type_id.startswith("eds.enterprise_office") or type_id.startswith("eds.hf."):
+        return "office"
+    return ""
+
+
+def family_type_choices(type_id):
+    family = desktop_type_family(type_id)
+    matched = [row for row in DESKTOP_TYPES if desktop_type_family(row[0]) == family]
+    choices = []
+    for group in dict.fromkeys(row[1] for row in matched):
+        choices.append((
+            group,
+            [(row_id, desktop_type_label(row_id)) for row_id, row_group, *_rest in matched if row_group == group],
+        ))
+    return choices
+
+
+def spec_summary(type_id, system_disk, data_disk):
+    hardware = desktop_type_label(type_id) if type_id in DESKTOP_TYPE_SPECS else (type_id or "unknown type")
+    return "{} · system {} GiB · data {} GiB".format(hardware, system_disk, data_disk)
+
+
+# ModifyDesktopSpec limits. Disks can only grow, in steps of 10 GiB.
+SPEC_SYSTEM_MIN = 80
+SPEC_SYSTEM_MAX = 500
+SPEC_DATA_MAX = 1020
+SPEC_DATA_MIN = {"office": 20, "graphics": 40}
+SPEC_CHANGE_WAIT_MINUTES = 5
+
+
+def valid_grown_disk(size, current, floor, ceiling):
+    try:
+        size = int(size)
+        current = int(current or 0)
+    except (TypeError, ValueError):
+        return False
+    if size == current:
+        return True
+    if size < current or size < floor or size > ceiling or size % DISK_STEP != 0:
+        return False
+    return True
+
+
+def valid_disk_size(size, minimum, maximum, allow_zero=False):
+    try:
+        size = int(size)
+    except (TypeError, ValueError):
+        return False
+    if allow_zero and size == 0:
+        return True
+    return minimum <= size <= maximum and size % DISK_STEP == 0

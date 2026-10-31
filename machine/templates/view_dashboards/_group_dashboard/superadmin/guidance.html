@@ -1,0 +1,62 @@
+{% extends "view_dashboards/base.html" %}
+
+{% block extra_css %}
+<style>
+    a.guidance-step:hover {
+        background-color: var(--brand-forest-dark);
+        border-color: var(--brand-forest-dark);
+        color: #ffffff;
+    }
+    a.guidance-step:hover i {
+        color: #ffffff;
+    }
+</style>
+{% endblock extra_css %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Guidance</h1>
+        <p class="page-subtitle">Create a cloud computer, then give it to one user.</p>
+    </div>
+</div>
+
+<div class="card">
+    <ol class="mb-0">
+        <li class="mb-4">
+            <strong>Create the person who will sign in.</strong>
+            <p class="mb-1">Each computer belongs to one user. Create the Wuying login before you assign a computer. If the password boxes are empty, the dashboard makes one and shows it on the Users page.</p>
+            <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:user_profile_create' %}"><i class="bi bi-person-plus" aria-hidden="true"></i> Add a user</a>
+        </li>
+        <li class="mb-4">
+            <strong>Choose the hardware, if you want a size other than the standard computer.</strong>
+            <p class="mb-1">A profile sets the desktop type and disks. Leave this out when you create the computer to buy 6 vCPU, 12 GB, an 80 GiB system disk, and no data disk. Data disk 0 means no extra disk.</p>
+            <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:vm_profile_create' %}"><i class="bi bi-hdd" aria-hidden="true"></i> Add a VM profile</a>
+        </li>
+        <li class="mb-4">
+            <strong>Buy the computer.</strong>
+            <p class="mb-1">The user field can stay empty. Alibaba still creates a Windows 11 Pro computer in Hangzhou and bills it pay-as-you-go. The status stays Creating until the computer is ready.</p>
+            <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:desktop_create' %}"><i class="bi bi-display" aria-hidden="true"></i> Create a cloud computer</a>
+        </li>
+        <li class="mb-4">
+            <strong>Wait until the status is Running.</strong>
+            <p class="mb-1">The desktop page updates itself. You can assign a user only after the computer is Running. If it is Stopped, start it first.</p>
+            <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:desktop_list' %}"><i class="bi bi-list-ul" aria-hidden="true"></i> Open the desktop list</a>
+        </li>
+        <li class="mb-4">
+            <strong>Assign the computer after it exists.</strong>
+            <p class="mb-1">Open the desktop, choose Edit, and pick the user. Save. Alibaba replaces the assigned person, so one computer still has one user. They see the computer after they sign in.</p>
+            <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:desktop_list' %}"><i class="bi bi-person-check" aria-hidden="true"></i> Choose a desktop, then Edit</a>
+        </li>
+        <li class="mb-0">
+            <strong>Send the sign-in details.</strong>
+            <p class="mb-1">In the Wuying app, choose Enterprise &amp; Business, enter the office network ID, then the username and password from the Users page. The desktop list can copy that text.</p>
+            <p class="d-flex flex-wrap gap-2 mb-2">
+                <a class="btn-table-action guidance-step" href="{{ wuying_download_url }}" target="_blank" rel="noopener"><i class="bi bi-download" aria-hidden="true"></i> Download the Wuying app</a>
+                <a class="btn-table-action guidance-step" href="{{ wuying_web_url }}" target="_blank" rel="noopener"><i class="bi bi-globe" aria-hidden="true"></i> Open the browser client</a>
+            </p>
+            <p class="mb-0">Office network ID: {{ office_network_id|default:"Set DIRECTORY_ID in local settings" }}</p>
+        </li>
+    </ol>
+</div>
+{% endblock content %}

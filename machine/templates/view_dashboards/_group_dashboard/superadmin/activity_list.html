@@ -1,10 +1,11 @@
 {% extends "view_dashboards/base.html" %}
+{% load dashboard_time %}
 
 {% block content %}
 <div class="page-header">
     <div>
         <h1 class="page-title">Activity</h1>
-        <p class="page-subtitle">Operations recorded for cloud desktops.</p>
+        <p class="page-subtitle">Create, start, stop, restart, connect, assign, change specifications, delete, sync, and user actions. A deleted desktop stays in this list.</p>
     </div>
 </div>
 
@@ -16,24 +17,31 @@
                     <th>When</th>
                     <th>Actor</th>
                     <th>Action</th>
-                    <th>Desktop</th>
+                    <th>Subject</th>
+                    <th>Change</th>
                     <th>Details</th>
                 </tr>
             </thead>
             <tbody>
                 {% for log in activity_logs %}
                 <tr>
-                    <td>{{ log.created|date:"Y-m-d H:i" }}</td>
+                    <td>{{ log.created|dash_datetime }}</td>
                     <td>{{ log.actor|default:"-" }}</td>
-                    <td>{{ log.action|default:"-" }}</td>
+                    <td>{{ log.get_action_display|default:"-" }}</td>
                     <td>
-                        <a href="{% url 'view_dashboards:desktop_detail' log.virtual_machine_id %}">{{ log.virtual_machine }}</a>
+                        {% if log.virtual_machine_id %}
+                            <a href="{% url 'view_dashboards:desktop_detail' log.virtual_machine_id %}">{{ log.subject }}</a>
+                        {% else %}
+                            {{ log.subject }}
+                        {% endif %}
+                        {% if log.cloud_id %}<div class="table-user-sub">{{ log.cloud_id }}</div>{% endif %}
                     </td>
+                    <td>{% if log.old_value or log.new_value %}{{ log.old_value|default:"-" }} → {{ log.new_value|default:"-" }}{% else %}-{% endif %}</td>
                     <td>{{ log.details|default:"-"|truncatechars:80 }}</td>
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="5" class="text-muted-green">No activity yet.</td>
+                    <td colspan="6" class="text-muted-green">No activity yet.</td>
                 </tr>
                 {% endfor %}
             </tbody>

@@ -36,6 +36,10 @@ class TimeStampedModel(models.Model):
         abstract = True
         get_latest_by = 'created'
 
+    def _stamp(self, value):
+        text = localtime(value).strftime("%d/%m/%y<br /> %I:%M %p")
+        return text[:-2] + text[-2:].lower()
+
     def admin_created(self):
         """
         Return admin display created.
@@ -43,11 +47,11 @@ class TimeStampedModel(models.Model):
         if self.created_by:
             return format_html(
                 mark_safe("{}<br /> {}".format(
-                    self.created_by, localtime(self.created).strftime("%Y-%m-%d<br /> %I:%M %p")
+                    self.created_by, self._stamp(self.created)
                 ))
             )
         else:
-            return format_html(mark_safe("{}".format(localtime(self.created).strftime("%Y-%m-%d<br /> %I:%M %p"))))
+            return format_html(mark_safe("{}".format(self._stamp(self.created))))
 
     admin_created.admin_order_field = 'created'
     admin_created.short_description = 'Created'
@@ -59,11 +63,11 @@ class TimeStampedModel(models.Model):
         if self.modified_by:
             return format_html(
                 mark_safe("{}<br /> {}".format(
-                    self.modified_by, localtime(self.modified).strftime("%Y-%m-%d<br /> %I:%M %p")
+                    self.modified_by, self._stamp(self.modified)
                 ))
             )
         else:
-            return format_html(mark_safe("{}".format(localtime(self.modified).strftime("%Y-%m-%d<br /> %I:%M %p"))))
+            return format_html(mark_safe("{}".format(self._stamp(self.modified))))
 
     admin_modified.admin_order_field = 'modified'
     admin_modified.short_description = 'Modified'

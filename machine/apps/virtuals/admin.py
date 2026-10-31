@@ -13,5 +13,5 @@ class VirtualMachineAdmin(admin.ModelAdmin):
 
 @admin.register(ActivityLog)
 class ActivityLogAdmin(admin.ModelAdmin):
-    list_display = ('actor', 'virtual_machine', 'action', 'created')
-    search_fields = ('actor__username', 'virtual_machine__name', 'action')
+    list_display = ('actor', 'desktop_name', 'action', 'created')
+    search_fields = ('actor__username', 'desktop_name', 'cloud_id', 'action')

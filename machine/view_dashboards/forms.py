@@ -1,19 +1,33 @@
 import re
 import secrets
 import string
+from datetime import timedelta
 
 from django import forms
 from django.contrib.auth.forms import AuthenticationForm
 from django.contrib.auth.models import User
+from django.utils import timezone
 
 from apps.profiles.models import Profile
 from apps.virtuals.choices import (
-    DATA_DISK_CHOICES,
+    DATA_DISK_MAX,
+    DATA_DISK_MIN,
     DESKTOP_TYPE_CHOICES,
     DESKTOP_TYPE_SPECS,
-    SYSTEM_DISK_CHOICES,
+    DISK_STEP,
+    SPEC_CHANGE_WAIT_MINUTES,
+    SPEC_DATA_MAX,
+    SPEC_DATA_MIN,
+    SPEC_SYSTEM_MAX,
+    SPEC_SYSTEM_MIN,
+    SYSTEM_DISK_MAX,
+    SYSTEM_DISK_MIN,
+    desktop_type_family,
+    family_type_choices,
+    valid_disk_size,
+    valid_grown_disk,
 )
-from apps.virtuals.models import VMProfile, VirtualMachine
+from apps.virtuals.models import ActivityLog, VMProfile, VirtualMachine
 
 class DashboardLoginForm(AuthenticationForm):
     username = forms.CharField(label="Username")
@@ -59,6 +73,99 @@ class DesktopCreateForm(forms.ModelForm):
         return name
 
 
+class DesktopSpecForm(forms.Form):
+    desktop_type = forms.ChoiceField(
+        label="Desktop type",
+        choices=[],
+        help_text="CPU, memory, and GPU change together. Office types stay with office types, and graphics types stay with graphics types.",
+    )
+    system_disk = forms.IntegerField(
+        label="System disk (GiB)",
+        help_text="Can only grow, in steps of 10 GiB. Alibaba accepts 80 to 500 GiB when you change it.",
+    )
+    data_disk = forms.IntegerField(
+        label="Data disk (GiB)",
+        help_text="Can only grow, in steps of 10 GiB. Leave 0 if this computer has no data disk.",
+    )
+
+    def __init__(self, desktop, *args, **kwargs):
+        self.desktop = desktop
+        super(DesktopSpecForm, self).__init__(*args, **kwargs)
+        family = desktop_type_family(desktop.desktop_type)
+        choices = family_type_choices(desktop.desktop_type)
+        if choices:
+            self.fields["desktop_type"].choices = choices
+            self.fields["desktop_type"].initial = desktop.desktop_type
+        else:
+            self.fields["desktop_type"].choices = [("", "Sync this desktop from Alibaba first")]
+            self.fields["desktop_type"].disabled = True
+        data_floor = SPEC_DATA_MIN.get(family, SPEC_DATA_MIN["office"])
+        self.fields["system_disk"].initial = desktop.system_disk
+        self.fields["data_disk"].initial = desktop.data_disk
+        self.fields["system_disk"].widget.attrs.update({
+            "step": DISK_STEP,
+            "min": desktop.system_disk or SPEC_SYSTEM_MIN,
+            "max": max(SPEC_SYSTEM_MAX, desktop.system_disk or 0),
+        })
+        self.fields["data_disk"].widget.attrs.update({
+            "step": DISK_STEP,
+            "min": desktop.data_disk or 0,
+            "max": max(SPEC_DATA_MAX, desktop.data_disk or 0),
+        })
+        self.fields["data_disk"].help_text = (
+            "Can only grow, in steps of 10 GiB. A new data disk starts at {} GiB and can reach {} GiB. "
+            "Keep the current size, including 0, to leave the disk unchanged."
+        ).format(data_floor, SPEC_DATA_MAX)
+
+    def clean(self):
+        cleaned = super(DesktopSpecForm, self).clean()
+        desktop = self.desktop
+        family = desktop_type_family(desktop.desktop_type)
+        type_id = cleaned.get("desktop_type") or desktop.desktop_type
+        system_disk = cleaned.get("system_disk")
+        data_disk = cleaned.get("data_disk")
+        if system_disk is None or data_disk is None:
+            return cleaned
+        if not desktop.vm_id:
+            raise forms.ValidationError("This desktop has no Alibaba computer yet.")
+        if not desktop.desktop_type or desktop.desktop_type not in DESKTOP_TYPE_SPECS:
+            raise forms.ValidationError("Sync this desktop from Alibaba so its type is known, then change it.")
+        if desktop.status != "Stopped":
+            raise forms.ValidationError(
+                "Stop this computer first. It is currently {}.".format(desktop.get_status_display())
+            )
+        if type_id != desktop.desktop_type and desktop_type_family(type_id) != family:
+            self.add_error("desktop_type", "Stay in the same family. Office stays with office, and graphics stays with graphics.")
+        data_floor = SPEC_DATA_MIN.get(family, SPEC_DATA_MIN["office"])
+        if not valid_grown_disk(system_disk, desktop.system_disk, SPEC_SYSTEM_MIN, SPEC_SYSTEM_MAX):
+            self.add_error(
+                "system_disk",
+                "Keep {} GiB, or grow it to {}–{} GiB in steps of 10. Disks cannot shrink.".format(
+                    desktop.system_disk, max(SPEC_SYSTEM_MIN, desktop.system_disk or 0), SPEC_SYSTEM_MAX,
+                ),
+            )
+        if not valid_grown_disk(data_disk, desktop.data_disk, data_floor, SPEC_DATA_MAX):
+            self.add_error(
+                "data_disk",
+                "Keep {} GiB, or grow it from {} GiB up to {} GiB in steps of 10. Disks cannot shrink.".format(
+                    desktop.data_disk, max(data_floor, (desktop.data_disk or 0) + DISK_STEP if desktop.data_disk else data_floor), SPEC_DATA_MAX,
+                ),
+            )
+        changed = (
+            type_id != desktop.desktop_type
+            or system_disk != desktop.system_disk
+            or data_disk != desktop.data_disk
+        )
+        if not changed and not self.errors:
+            raise forms.ValidationError("Change the desktop type or a disk size.")
+        if changed and desktop.pk:
+            recent = ActivityLog.objects.filter(virtual_machine=desktop, action="Resize").order_by("-created").first()
+            if recent and timezone.now() - recent.created < timedelta(minutes=SPEC_CHANGE_WAIT_MINUTES):
+                raise forms.ValidationError("Wait 5 minutes between specification changes.")
+        cleaned["desktop_type"] = type_id
+        return cleaned
+
+
 class VirtualMachineForm(forms.ModelForm):
     class Meta:
         model = VirtualMachine
@@ -77,6 +184,56 @@ class VirtualMachineForm(forms.ModelForm):
         self.fields['current_profile'].queryset = VMProfile.objects.order_by('name')
 
 
+DESKTOP_TYPE_GUIDE = [
+    {
+        "title": "Enterprise Office.",
+        "text": "Everyday work: browser, Office, email, and light applications. No GPU. This is the usual choice and the lower price.",
+    },
+    {
+        "title": "High Frequency Office.",
+        "text": "The same kind of office work, with a faster CPU for programs that need more speed. No GPU. It costs more than Enterprise Office at a similar size.",
+    },
+    {
+        "title": "Graphics Workstation Pro.",
+        "text": "Design, 3D, and video. It includes a GPU. An office computer cannot be changed into this family later.",
+    },
+    {
+        "title": "AI Workstation Elite.",
+        "text": "Heavy GPU work. It has the largest GPU memory and the highest price. It stays in the graphics family.",
+    },
+]
+
+SYSTEM_DISK_GUIDE = [
+    {
+        "title": "What it stores.",
+        "text": "Windows and installed programs. User files can also live here, but a data disk keeps them separate.",
+    },
+    {
+        "title": "Size.",
+        "text": "60 to 2040 GiB, in steps of 10. Windows 11 Pro is a 50 GiB image, so the disk must be greater than 50 GiB.",
+    },
+    {
+        "title": "After purchase.",
+        "text": "The disk can only grow. A specification change accepts 80 to 500 GiB.",
+    },
+]
+
+DATA_DISK_GUIDE = [
+    {
+        "title": "What it stores.",
+        "text": "Extra space for files. It does not hold Windows. 0 means the computer has no data disk.",
+    },
+    {
+        "title": "Size.",
+        "text": "Use 0 for no data disk. A custom data disk is 50 to 2040 GiB, in steps of 10.",
+    },
+    {
+        "title": "After purchase.",
+        "text": "The disk can only grow, up to 1020 GiB. A new data disk starts at 20 GiB on an office computer and 40 GiB on a graphics computer.",
+    },
+]
+
+
 class VMProfileForm(forms.ModelForm):
     instance_type_code = forms.ChoiceField(
         label="Desktop type",
@@ -84,25 +241,44 @@ class VMProfileForm(forms.ModelForm):
         initial="eds.enterprise_office.6c12g",
         help_text="Same hardware list as the Alibaba console. CPU, RAM, and GPU fill in from this type.",
     )
-    system_disk = forms.TypedChoiceField(
-        label="System Disk (GB)",
-        choices=SYSTEM_DISK_CHOICES,
-        coerce=int,
+    system_disk = forms.IntegerField(
+        label="System disk (GiB)",
+        min_value=SYSTEM_DISK_MIN,
+        max_value=SYSTEM_DISK_MAX,
         initial=80,
-        help_text="Sizes offered by Alibaba for pay-as-you-go desktops.",
+        widget=forms.NumberInput(attrs={"step": DISK_STEP, "min": SYSTEM_DISK_MIN, "max": SYSTEM_DISK_MAX}),
+        help_text="Custom purchase: 60 to 2040 GiB, in steps of 10. Windows 11 Pro is a 50 GiB image, so the disk must be greater than 50 GiB.",
     )
-    data_disk = forms.TypedChoiceField(
-        label="Data Disk (GB)",
-        choices=DATA_DISK_CHOICES,
-        coerce=int,
-        empty_value=0,
-        required=False,
-        help_text="Sizes offered by Alibaba for pay-as-you-go desktops.",
+    data_disk = forms.IntegerField(
+        label="Data disk (GiB)",
+        min_value=0,
+        max_value=DATA_DISK_MAX,
+        initial=0,
+        widget=forms.NumberInput(attrs={"step": DISK_STEP, "min": 0, "max": DATA_DISK_MAX}),
+        help_text="Use 0 for no data disk, or 50 to 2040 GiB in steps of 10.",
     )
+
+    def __init__(self, *args, **kwargs):
+        super(VMProfileForm, self).__init__(*args, **kwargs)
+        self.fields["instance_type_code"].guide = DESKTOP_TYPE_GUIDE
+        self.fields["system_disk"].guide = SYSTEM_DISK_GUIDE
+        self.fields["data_disk"].guide = DATA_DISK_GUIDE
 
     class Meta:
         model = VMProfile
         fields = ('name', 'instance_type_code', 'system_disk', 'data_disk')
+
+    def clean_system_disk(self):
+        size = self.cleaned_data["system_disk"]
+        if not valid_disk_size(size, SYSTEM_DISK_MIN, SYSTEM_DISK_MAX):
+            raise forms.ValidationError("Use 60 to 2040 GiB, in steps of 10. It must be greater than the 50 GiB image.")
+        return size
+
+    def clean_data_disk(self):
+        size = self.cleaned_data["data_disk"]
+        if not valid_disk_size(size, DATA_DISK_MIN, DATA_DISK_MAX, allow_zero=True):
+            raise forms.ValidationError("Use 0 for no data disk, or 50 to 2040 GiB in steps of 10.")
+        return size
 
     def save(self, commit=True):
         profile = super(VMProfileForm, self).save(commit=False)

@@ -1,4 +1,5 @@
 {% extends "view_dashboards/base.html" %}
+{% load dashboard_time %}
 
 {% block content %}
 <div class="page-header">
@@ -25,6 +26,7 @@
                 <button class="btn btn-outline-dark btn-sm" type="submit">Connect</button>
             </form>
         {% endif %}
+        <a class="btn-table-action" href="{% url 'view_dashboards:desktop_spec' desktop.pk %}">Change specifications</a>
         <a class="btn-table-action" href="{% url 'view_dashboards:desktop_update' desktop.pk %}">Edit</a>
         <a class="btn btn-outline-danger btn-sm" href="{% url 'view_dashboards:desktop_delete' desktop.pk %}">Delete</a>
         <a class="btn-table-action" href="{% url 'view_dashboards:desktop_list' %}">Back to list</a>
@@ -42,7 +44,21 @@
             </div>
             <dl class="row mb-0">
                 <dt class="col-5">Status</dt>
-                <dd class="col-7">{{ desktop.get_status_display }}</dd>
+                <dd class="col-7" data-desktop-status="{{ desktop.pk }}">
+                    <span data-desktop-badge="{{ desktop.pk }}">{{ desktop.get_status_display }}</span>
+                    <div class="progress mt-2" data-desktop-bar="{{ desktop.pk }}" style="height: 6px;{% if not desktop_busy %} display: none;{% endif %}">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%; background-color: #072F1F;"></div>
+                    </div>
+                </dd>
+                <dt class="col-5">Price</dt>
+                <dd class="col-7">
+                    {% if desktop_price %}
+                        ${{ desktop_price.hourly|floatformat:4 }} per hour while it is running.
+                        About ${{ desktop_price.monthly|floatformat:2 }} if it stays on all month.
+                    {% else %}
+                        -
+                    {% endif %}
+                </dd>
                 <dt class="col-5">Assigned user</dt>
                 <dd class="col-7">{{ desktop.user|default:"Unassigned" }}</dd>
                 <dt class="col-5">Profile</dt>
@@ -58,9 +74,9 @@
                 <dt class="col-5">Private IP</dt>
                 <dd class="col-7">{{ desktop.private_ip|default:"-" }}</dd>
                 <dt class="col-5">Last start</dt>
-                <dd class="col-7">{{ desktop.last_start_time|date:"Y-m-d H:i"|default:"-" }}</dd>
+                <dd class="col-7">{{ desktop.last_start_time|dash_datetime|default:"-" }}</dd>
                 <dt class="col-5">Last stop</dt>
-                <dd class="col-7">{{ desktop.last_stop_time|date:"Y-m-d H:i"|default:"-" }}</dd>
+                <dd class="col-7">{{ desktop.last_stop_time|dash_datetime|default:"-" }}</dd>
             </dl>
         </div>
     </div>
@@ -82,10 +98,13 @@
                     <tbody>
                         {% for log in activity_logs %}
                         <tr>
-                            <td>{{ log.created|date:"Y-m-d H:i" }}</td>
+                            <td>{{ log.created|dash_datetime }}</td>
                             <td>{{ log.actor|default:"-" }}</td>
-                            <td>{{ log.action|default:"-" }}</td>
-                            <td>{{ log.details|default:"-"|truncatechars:80 }}</td>
+                            <td>{{ log.get_action_display|default:"-" }}</td>
+                            <td>
+                                {% if log.old_value or log.new_value %}{{ log.old_value|default:"-" }} → {{ log.new_value|default:"-" }}<br>{% endif %}
+                                {{ log.details|default:"-"|truncatechars:120 }}
+                            </td>
                         </tr>
                         {% empty %}
                         <tr>
@@ -99,3 +118,35 @@
     </div>
 </div>
 {% endblock content %}
+
+{% block extra_js %}
+<script>
+(function () {
+    var bars = document.querySelectorAll("[data-desktop-bar]");
+    var busy = Array.prototype.some.call(bars, function (bar) { return bar.style.display !== "none"; });
+    if (!busy) return;
+    var tries = 0;
+    function tick() {
+        fetch("{% url 'view_dashboards:desktop_progress' %}", {headers: {"Accept": "application/json"}})
+            .then(function (response) { return response.json(); })
+            .then(function (payload) {
+                var stillBusy = false;
+                (payload.desktops || []).forEach(function (row) {
+                    var badge = document.querySelector('[data-desktop-badge="' + row.id + '"]');
+                    var bar = document.querySelector('[data-desktop-bar="' + row.id + '"]');
+                    if (badge) badge.textContent = row.label;
+                    if (bar) bar.style.display = row.busy ? "" : "none";
+                    if (row.busy) stillBusy = true;
+                });
+                tries += 1;
+                if (stillBusy && tries < 150) setTimeout(tick, 8000);
+            })
+            .catch(function () {
+                if (tries < 150) setTimeout(tick, 8000);
+                tries += 1;
+            });
+    }
+    setTimeout(tick, 8000);
+})();
+</script>
+{% endblock extra_js %}

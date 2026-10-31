@@ -11,12 +11,20 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from django.conf import settings
+from django.core.cache import cache
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.profiles.models import Profile
-from apps.virtuals.choices import DATA_DISK_SIZES, DESKTOP_TYPE_SPECS, SYSTEM_DISK_SIZES
+from apps.virtuals.choices import (
+    DATA_DISK_MAX,
+    DATA_DISK_MIN,
+    DESKTOP_TYPE_SPECS,
+    SYSTEM_DISK_MAX,
+    SYSTEM_DISK_MIN,
+    valid_disk_size,
+)
 from apps.virtuals.models import ActivityLog, VMProfile, VirtualMachine
 
 ACCESS_KEY_ID = settings.ACCESS_KEY_ID
@@ -41,6 +49,7 @@ STATUS_FROM_CLOUD = {
     "Stopping": "Stopping",
     "Pending": "Creating",
     "Rebuilding": "Creating",
+    "Updating": "Updating",
     "Expired": "Error",
     "Deleted": "Error",
 }
@@ -232,15 +241,15 @@ def create_cloud_desktop(name, profile=None, end_user_id=""):
         raise AlibabaApiError("Set DIRECTORY_ID in local settings to the Hangzhou office network.")
 
     desktop_type, spec, system_disk, data_disk = resolve_desktop_spec(profile)
-    if system_disk not in SYSTEM_DISK_SIZES:
+    if not valid_disk_size(system_disk, SYSTEM_DISK_MIN, SYSTEM_DISK_MAX):
         raise AlibabaApiError(
-            "This profile asks for a {} GB system disk. Edit the profile and pick 80 or 120 GB.".format(
+            "This profile asks for a {} GiB system disk. Use 60 to 2040 GiB, in steps of 10. It must be greater than the 50 GiB image.".format(
                 system_disk,
             )
         )
-    if data_disk not in DATA_DISK_SIZES:
+    if not valid_disk_size(data_disk, DATA_DISK_MIN, DATA_DISK_MAX, allow_zero=True):
         raise AlibabaApiError(
-            "This profile asks for a {} GB data disk. Edit the profile and pick 0, 100, 200, 500, or 1000 GB.".format(
+            "This profile asks for a {} GiB data disk. Use 50 to 2040 GiB, in steps of 10.".format(
                 data_disk,
             )
         )
@@ -264,9 +273,44 @@ def create_cloud_desktop(name, profile=None, end_user_id=""):
         "vm_id": desktop_id_from(payload),
         "cpu": spec["cpu"],
         "ram": spec["ram"],
+        "desktop_type": desktop_type,
         "system_disk": system_disk,
         "data_disk": data_disk,
     }
+
+
+BUSY_STATUSES = ("Creating", "Starting", "Stopping", "Updating")
+HOURS_IN_MONTH = 730
+
+
+def desktop_hourly_price(desktop_type, system_disk, data_disk):
+    if not desktop_type:
+        return None
+    cache_key = "ecd-price:{}:{}:{}".format(desktop_type, system_disk or 0, data_disk or 0)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    payload = call_ecd("DescribePrice", {
+        "ResourceType": "Desktop",
+        "InstanceType": desktop_type,
+        "RootDiskSizeGib": system_disk or 80,
+        "UserDiskSizeGib": data_disk or 0,
+        "OsType": "Windows",
+        "PeriodUnit": "Hour",
+        "Period": 1,
+        "Amount": 1,
+    })
+    price = ((payload.get("PriceInfo") or {}).get("Price") or {})
+    trade = price.get("TradePrice")
+    if trade in (None, ""):
+        return None
+    quoted = {
+        "hourly": float(trade),
+        "monthly": float(trade) * HOURS_IN_MONTH,
+        "currency": price.get("Currency") or "USD",
+    }
+    cache.set(cache_key, quoted, 6 * 60 * 60)
+    return quoted
 
 
 def delete_cloud_desktop(vm_id):
@@ -280,6 +324,15 @@ def assign_desktop_user(vm_id, end_user_id=""):
     if end_user_id:
         extra["EndUserId.1"] = end_user_id
     call_ecd("ModifyEntitlement", extra)
+
+
+def modify_desktop_spec(vm_id, desktop_type, system_disk=None, data_disk=None):
+    extra = {"DesktopId": vm_id, "DesktopType": desktop_type}
+    if system_disk is not None:
+        extra["RootDiskSizeGib"] = int(system_disk)
+    if data_disk is not None:
+        extra["UserDiskSizeGib"] = int(data_disk)
+    call_ecd("ModifyDesktopSpec", extra)
 
 
 WUYING_USER_STATUS = {0: "Active", 9: "Locked"}
@@ -423,6 +476,7 @@ def apply_desktop(desktop):
 
     desktop_type = desktop.get("DesktopType")
     if desktop_type:
+        vm.desktop_type = desktop_type
         profile = VMProfile.objects.filter(instance_type_code=desktop_type).first()
         if profile:
             vm.current_profile = profile
@@ -471,13 +525,22 @@ def client_ip(request):
     return request.META.get("REMOTE_ADDR") or None
 
 
-def write_log(request, vm, action, details=""):
+def write_log(request, vm, action, details="", old_value="", new_value="", desktop_name="", cloud_id=""):
+    user = request.user if getattr(request.user, "is_authenticated", False) else None
+    if vm is not None:
+        desktop_name = desktop_name or (vm.name or "")
+        cloud_id = cloud_id or (vm.vm_id or "")
     ActivityLog.objects.create(
-        actor=request.user,
+        actor=user,
         virtual_machine=vm,
-        action=action,
-        details=details,
+        desktop_name=(desktop_name or "")[:255],
+        cloud_id=(cloud_id or "")[:200],
+        action=action or "",
+        old_value=old_value or "",
+        new_value=new_value or "",
+        details=details or "",
         ip_address=client_ip(request),
+        created_by=user,
     )
 
 
@@ -495,7 +558,7 @@ def operate_desktop(request, vm, action, ecd_action, next_status, time_field):
     elif time_field == "last_stop_time":
         vm.last_stop_time = datetime.now(timezone.utc)
     vm.save(update_fields=["status", time_field, "modified"])
-    write_log(request, vm, action)
+    write_log(request, vm, action, "{} requested.".format(action))
     return vm
 
 

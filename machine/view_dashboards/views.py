@@ -1,5 +1,6 @@
 import base64
 import logging
+from datetime import timedelta
 
 from django.shortcuts import get_object_or_404
 from django.views.generic.edit import CreateView, FormView, UpdateView, DeleteView
@@ -7,6 +8,7 @@ from django.views.generic.base import RedirectView, TemplateView
 from django.views.generic import DetailView, ListView, View
 
 from django.utils import timezone
+from django.utils.timezone import localtime
 from django.urls import reverse, reverse_lazy
 from django.utils.decorators import method_decorator
 from django.views.decorators.cache import never_cache
@@ -19,6 +21,7 @@ from django.conf import settings
 from django.contrib.auth import login, logout, authenticate
 
 from apps.profiles.models import Profile
+from apps.virtuals.choices import DESKTOP_TYPE_SPECS, spec_summary
 from apps.virtuals.models import ActivityLog, VMProfile, VirtualMachine
 from core.mixins import DashboardMixin, GroupRequiredMixin
 from view_api.views import (
@@ -29,12 +32,15 @@ from view_api.views import (
     apply_desktop,
     assign_desktop_user,
     connection_ticket,
+    BUSY_STATUSES,
     create_cloud_desktop,
     create_wuying_user,
     delete_cloud_desktop,
     describe_desktops,
     describe_wuying_users,
     change_wuying_password,
+    desktop_hourly_price,
+    modify_desktop_spec,
     remove_wuying_user,
     operate_desktop,
     write_log,
@@ -42,6 +48,7 @@ from view_api.views import (
 from .forms import (
     DashboardLoginForm,
     DesktopCreateForm,
+    DesktopSpecForm,
     UserProfileCreateForm,
     UserProfileDeleteForm,
     UserProfileForm,
@@ -147,6 +154,7 @@ class DashboardPageView(DashboardMixin, TemplateView):
             error=Count("id", filter=Q(status="Error")),
         )
         context['recent_logs'] = ActivityLog.objects.select_related("actor", "virtual_machine").order_by("-created")[:8]
+        context['cost'] = desktop_cost_report()
         return context
 
     def get_template_names(self):
@@ -154,6 +162,187 @@ class DashboardPageView(DashboardMixin, TemplateView):
         # authenticated dashboard user until dedicated staff templates exist.
         self.template_name = "view_dashboards/_group_dashboard/superadmin/dashboard.html"
         return super(DashboardPageView, self).get_template_names()
+
+
+def ensure_desktop_types():
+    missing = VirtualMachine.objects.filter(vm_id__gt="").filter(
+        Q(desktop_type="") | Q(desktop_type__isnull=True)
+    )
+    if not missing.exists():
+        return
+    try:
+        for desktop in describe_desktops():
+            apply_desktop(desktop)
+    except AlibabaApiError:
+        return
+
+
+RUNNING_ACTIONS = {"Create", "Start", "Restart"}
+STOPPED_ACTIONS = {"Stop", "Delete"}
+
+
+def running_intervals(vm, events, now):
+    if not events:
+        if vm.status == "Running":
+            start = vm.last_start_time or vm.created
+            return [(start, now)] if start else []
+        if vm.last_start_time and vm.last_stop_time and vm.last_start_time < vm.last_stop_time:
+            return [(vm.last_start_time, min(vm.last_stop_time, now))]
+        return []
+
+    intervals = []
+    opened = None
+    for event in events:
+        if event["action"] in RUNNING_ACTIONS and opened is None:
+            opened = event["created"]
+        elif event["action"] in STOPPED_ACTIONS and opened is not None:
+            intervals.append((opened, event["created"]))
+            opened = None
+    if opened is not None:
+        intervals.append((opened, now))
+    return intervals
+
+
+def add_daily_cost(daily, start, end, hourly):
+    start = localtime(start)
+    end = localtime(end)
+    cursor = start
+    while cursor < end:
+        next_midnight = (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        chunk_end = min(end, next_midnight)
+        hours = (chunk_end - cursor).total_seconds() / 3600
+        daily[cursor.date()] = daily.get(cursor.date(), 0) + hours * hourly
+        cursor = chunk_end
+
+
+def money_label(value):
+    if not value:
+        return "$0.00"
+    if abs(value) < 0.1:
+        return "${:.4f}".format(value)
+    return "${:.2f}".format(value)
+
+
+def cost_chart(points):
+    width, height = 640, 220
+    left, right, top, bottom = 58, 16, 16, 32
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    actual_peak = max((point["cumulative"] for point in points), default=0)
+    peak = actual_peak or 1
+    coords = []
+    steps = max(len(points) - 1, 1)
+    for index, point in enumerate(points):
+        x = left + plot_w * (index / steps)
+        y = top + plot_h - plot_h * (point["cumulative"] / peak)
+        coords.append({
+            "x": round(x, 1),
+            "y": round(y, 1),
+            "label": point["label"],
+            "cumulative_label": point["cumulative_label"],
+            "show_label": index == 0 or index == steps or (len(points) > 8 and index % 5 == 0),
+        })
+    if len(coords) == 1:
+        only = coords[0]
+        coords = [
+            dict(only, x=left, show_label=True),
+            dict(only, x=round(left + plot_w, 1), show_label=False),
+        ]
+    line = " ".join("{},{}".format(point["x"], point["y"]) for point in coords)
+    baseline = top + plot_h
+    area = "{left},{baseline} {line} {end},{baseline}".format(
+        left=left,
+        baseline=baseline,
+        line=line,
+        end=coords[-1]["x"] if coords else left,
+    )
+    return {
+        "width": width,
+        "height": height,
+        "left": left,
+        "baseline": baseline,
+        "peak_label": money_label(actual_peak),
+        "line": line,
+        "area": area,
+        "coords": coords,
+    }
+
+
+def desktop_cost_report():
+    now = timezone.now()
+    month_start = localtime(now).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    ensure_desktop_types()
+    vms = list(VirtualMachine.objects.select_related("current_profile").order_by("name"))
+    events = {}
+    if vms:
+        for row in ActivityLog.objects.filter(
+            virtual_machine_id__in=[vm.id for vm in vms],
+            action__in=["Create", "Start", "Stop", "Restart", "Delete"],
+        ).order_by("created").values("virtual_machine_id", "action", "created"):
+            events.setdefault(row["virtual_machine_id"], []).append(row)
+
+    daily = {}
+    rows = []
+    unpriced = 0
+    for vm in vms:
+        quote = quote_desktop(vm)
+        if not quote:
+            unpriced += 1
+            continue
+        hours = 0
+        for start, end in running_intervals(vm, events.get(vm.id, []), now):
+            start = max(start, month_start)
+            end = min(end, now)
+            if end <= start:
+                continue
+            hours += (end - start).total_seconds() / 3600
+            add_daily_cost(daily, start, end, quote["hourly"])
+        rows.append({
+            "name": vm.name or "Untitled",
+            "pk": vm.pk,
+            "hours": hours,
+            "cost": hours * quote["hourly"],
+            "hours_label": "{:.1f} h".format(hours),
+            "cost_label": money_label(hours * quote["hourly"]),
+            "hourly_label": money_label(quote["hourly"]),
+        })
+
+    points = []
+    cumulative = 0
+    day = month_start.date()
+    today = localtime(now).date()
+    while day <= today:
+        cumulative += daily.get(day, 0)
+        points.append({
+            "label": day.strftime("%d/%m/%y"),
+            "cumulative": cumulative,
+            "cumulative_label": money_label(cumulative),
+        })
+        day += timedelta(days=1)
+
+    total = points[-1]["cumulative"] if points else 0
+    rows.sort(key=lambda row: row["cost"], reverse=True)
+    return {
+        "month_label": month_start.strftime("%B %Y"),
+        "total": total,
+        "total_label": money_label(total),
+        "points": points,
+        "chart": cost_chart(points),
+        "rows": rows,
+        "unpriced": unpriced,
+    }
+
+
+def quote_desktop(vm):
+    desktop_type = vm.desktop_type
+    if not desktop_type and vm.current_profile_id:
+        desktop_type = vm.current_profile.instance_type_code or ""
+    if not desktop_type:
+        return None
+    try:
+        return desktop_hourly_price(desktop_type, vm.system_disk, vm.data_disk)
+    except AlibabaApiError:
+        return None
 
 
 class DesktopListView(GroupRequiredMixin, DashboardMixin, ListView):
@@ -174,6 +363,15 @@ class DesktopListView(GroupRequiredMixin, DashboardMixin, ListView):
         context["wuying_download_url"] = WUYING_DOWNLOAD_URL
         context["wuying_web_url"] = WUYING_WEB_URL
         context["office_network_id"] = settings.DIRECTORY_ID if settings.DIRECTORY_ID != "xxxx" else ""
+        context["busy_statuses"] = BUSY_STATUSES
+        ensure_desktop_types()
+        monthly_total = 0
+        for desktop in context["desktops"]:
+            desktop.refresh_from_db()
+            desktop.price = quote_desktop(desktop)
+            if desktop.price:
+                monthly_total += desktop.price["monthly"]
+        context["monthly_total"] = monthly_total
         return context
 
 
@@ -189,14 +387,14 @@ class DesktopDetailView(GroupRequiredMixin, DashboardMixin, DetailView):
     def get_context_data(self, **kwargs):
         context = super(DesktopDetailView, self).get_context_data(**kwargs)
         context["page_title"] = self.object.name or "Desktop"
+        ensure_desktop_types()
+        self.object.refresh_from_db()
+        context["desktop_price"] = quote_desktop(self.object)
+        context["desktop_busy"] = self.object.status in BUSY_STATUSES
         context["selected_page"] = "desktops"
         context["main_nav"] = "desktops"
         context["activity_logs"] = self.object.activity_logs.select_related("actor").order_by("-created")[:30]
         return context
-
-
-def client_ip(request):
-    return request.META.get('REMOTE_ADDR') or None
 
 
 def apply_profile_defaults(vm):
@@ -213,17 +411,8 @@ def apply_profile_defaults(vm):
         vm.data_disk = profile.data_disk
 
 
-def log_desktop(request, vm, action, old_value='', new_value='', details=''):
-    ActivityLog.objects.create(
-        actor=request.user,
-        virtual_machine=vm,
-        action=action,
-        old_value=old_value,
-        new_value=new_value,
-        details=details,
-        ip_address=client_ip(request),
-        created_by=request.user,
-    )
+def log_desktop(request, vm, action, old_value='', new_value='', details='', desktop_name='', cloud_id=''):
+    write_log(request, vm, action, details, old_value, new_value, desktop_name, cloud_id)
 
 
 class DashboardFormMixin(DashboardMixin):
@@ -263,12 +452,20 @@ class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
         try:
             created = create_cloud_desktop(vm.name, vm.current_profile, end_user_id)
         except AlibabaApiError as exc:
+            log_desktop(
+                self.request,
+                None,
+                "API Error",
+                details=str(exc),
+                desktop_name=vm.name or "",
+            )
             form.add_error(None, str(exc))
             return self.form_invalid(form)
 
         vm.vm_id = created["vm_id"]
         vm.cpu = created["cpu"]
         vm.ram = created["ram"]
+        vm.desktop_type = created["desktop_type"]
         vm.system_disk = created["system_disk"]
         vm.data_disk = created["data_disk"]
         vm.status = "Creating"
@@ -280,13 +477,21 @@ class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
         log_desktop(
             self.request,
             vm,
-            'Assign' if vm.user_id else None,
-            new_value=str(vm.user or ''),
-            details='Created Windows 11 Pro desktop on Alibaba, pay-as-you-go',
+            "Create",
+            new_value=spec_summary(vm.desktop_type, vm.system_disk, vm.data_disk),
+            details="Created Windows 11 Pro desktop on Alibaba, pay-as-you-go",
         )
+        if vm.user_id:
+            log_desktop(
+                self.request,
+                vm,
+                "Assign",
+                new_value=str(vm.user),
+                details="Assigned when the desktop was created",
+            )
         messages.success(
             self.request,
-            'Alibaba is creating this Windows 11 Pro desktop. Billing is pay-as-you-go. Sync from Alibaba to refresh the status.',
+            'Alibaba is creating this Windows 11 Pro desktop. This page updates the status on its own.',
         )
         return HttpResponseRedirect(self.get_success_url())
 
@@ -324,6 +529,7 @@ class DesktopUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
             try:
                 assign_desktop_user(vm.vm_id, end_user_id)
             except AlibabaApiError as exc:
+                log_desktop(self.request, vm, "API Error", details=str(exc))
                 form.add_error(None, 'Alibaba could not change the user: {} The computer must be Running.'.format(exc))
                 return self.form_invalid(form)
             assigned_in_alibaba = True
@@ -349,7 +555,7 @@ class DesktopUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
             new_value = '{}C / {}GB'.format(vm.cpu, vm.ram)
             details = 'Changed hardware'
         else:
-            action = None
+            action = "Update"
             old_value = ''
             new_value = ''
             details = 'Updated desktop'
@@ -365,6 +571,84 @@ class DesktopUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
 
     def get_success_url(self):
         return reverse('view_dashboards:desktop_detail', args=[self.object.pk])
+
+
+class DesktopSpecView(GroupRequiredMixin, DashboardFormMixin, FormView):
+    group_required = ['superadmin']
+    form_class = DesktopSpecForm
+    cancel_url_name = 'view_dashboards:desktop_list'
+
+    def dispatch(self, request, *args, **kwargs):
+        self.desktop = get_object_or_404(VirtualMachine, pk=kwargs['pk'])
+        return super(DesktopSpecView, self).dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self):
+        kwargs = super(DesktopSpecView, self).get_form_kwargs()
+        kwargs['desktop'] = self.desktop
+        return kwargs
+
+    def get_context_data(self, **kwargs):
+        context = super(DesktopSpecView, self).get_context_data(**kwargs)
+        context['page_title'] = 'Change specifications'
+        context['main_nav'] = 'desktops'
+        context['submit_label'] = 'Change specifications'
+        context['cancel_url'] = reverse('view_dashboards:desktop_detail', args=[self.desktop.pk])
+        rules = (
+            'The computer must be Stopped. CPU, memory, and GPU change together, and only inside the same family. '
+            'Disks can only grow. Windows and files stay on the computer. Wait 5 minutes between changes.'
+        )
+        if self.desktop.status != 'Stopped':
+            rules = 'This computer is {}. Stop it before changing specifications. {}'.format(
+                self.desktop.get_status_display(), rules,
+            )
+        context['page_subtitle'] = rules
+        return context
+
+    def form_valid(self, form):
+        desktop = self.desktop
+        type_id = form.cleaned_data['desktop_type']
+        system_disk = form.cleaned_data['system_disk']
+        data_disk = form.cleaned_data['data_disk']
+        old_value = spec_summary(desktop.desktop_type, desktop.system_disk, desktop.data_disk)
+        try:
+            modify_desktop_spec(
+                desktop.vm_id,
+                type_id,
+                system_disk if system_disk != desktop.system_disk else None,
+                data_disk if data_disk != desktop.data_disk else None,
+            )
+        except AlibabaApiError as exc:
+            log_desktop(self.request, desktop, 'API Error', details=str(exc))
+            form.add_error(None, str(exc))
+            return self.form_invalid(form)
+
+        spec = DESKTOP_TYPE_SPECS.get(type_id) or {}
+        desktop.desktop_type = type_id
+        desktop.cpu = spec.get('cpu', desktop.cpu)
+        desktop.ram = spec.get('ram', desktop.ram)
+        desktop.system_disk = system_disk
+        desktop.data_disk = data_disk
+        desktop.current_profile = VMProfile.objects.filter(
+            instance_type_code=type_id,
+            system_disk=system_disk,
+            data_disk=data_disk,
+        ).first()
+        desktop.status = 'Updating'
+        desktop.modified_by = self.request.user
+        desktop.save()
+        log_desktop(
+            self.request,
+            desktop,
+            'Resize',
+            old_value=old_value,
+            new_value=spec_summary(type_id, system_disk, data_disk),
+            details='Changed specifications on Alibaba. The computer stays stopped until you start it.',
+        )
+        messages.success(
+            self.request,
+            'Alibaba is changing this computer. Files and Windows stay. Start it again when the status leaves Updating.',
+        )
+        return HttpResponseRedirect(reverse('view_dashboards:desktop_detail', args=[desktop.pk]))
 
 
 class VMProfileListView(GroupRequiredMixin, DashboardMixin, ListView):
@@ -402,6 +686,12 @@ class VMProfileCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
         profile.created_by = self.request.user
         profile.save()
         self.object = profile
+        log_desktop(
+            self.request, None, "Create",
+            new_value=spec_summary(profile.instance_type_code, profile.system_disk, profile.data_disk),
+            details="Saved a hardware profile.",
+            desktop_name=profile.name or "VM profile",
+        )
         messages.success(self.request, 'VM profile saved.')
         return HttpResponseRedirect(self.get_success_url())
 
@@ -427,6 +717,12 @@ class VMProfileUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
         profile.modified_by = self.request.user
         profile.save()
         self.object = profile
+        log_desktop(
+            self.request, None, "Update",
+            new_value=spec_summary(profile.instance_type_code, profile.system_disk, profile.data_disk),
+            details="Updated a hardware profile.",
+            desktop_name=profile.name or "VM profile",
+        )
         messages.success(self.request, 'VM profile updated.')
         return HttpResponseRedirect(self.get_success_url())
 
@@ -493,6 +789,7 @@ class UserProfileCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
                 form.add_error('eds_end_user_id', 'Alibaba has no Wuying user with this username.')
                 return self.form_invalid(form)
         except AlibabaApiError as exc:
+            log_desktop(self.request, None, "API Error", details=str(exc), desktop_name=end_user_id or "")
             form.add_error(None, str(exc))
             return self.form_invalid(form)
 
@@ -505,8 +802,20 @@ class UserProfileCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
         profile.save()
         self.object = profile
         if form.cleaned_data['wuying_mode'] == 'create':
+            log_desktop(
+                self.request, None, "Create user",
+                new_value=end_user_id,
+                details="Created the Wuying user in Alibaba and linked it.",
+                desktop_name=profile.user.username,
+            )
             messages.success(self.request, 'Wuying user created in Alibaba and linked. They can sign in to the Wuying app now.')
         else:
+            log_desktop(
+                self.request, None, "Update",
+                new_value=end_user_id,
+                details="Linked a Wuying user that already exists in Alibaba.",
+                desktop_name=profile.user.username,
+            )
             messages.success(self.request, 'Wuying user linked.')
         return HttpResponseRedirect(self.get_success_url())
 
@@ -532,6 +841,12 @@ class UserProfileUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
         profile.modified_by = self.request.user
         profile.save()
         self.object = profile
+        log_desktop(
+            self.request, None, "Update",
+            new_value=profile.eds_end_user_id or "",
+            details="Updated the user profile.",
+            desktop_name=profile.user.username,
+        )
         messages.success(self.request, 'User profile updated.')
         return HttpResponseRedirect(self.get_success_url())
 
@@ -566,10 +881,19 @@ class UserProfilePasswordView(GroupRequiredMixin, DashboardFormMixin, FormView):
         try:
             change_wuying_password(self.profile.eds_end_user_id, form.cleaned_data['new_password'])
         except AlibabaApiError as exc:
+            log_desktop(
+                self.request, None, "API Error", details=str(exc),
+                desktop_name=self.profile.user.username,
+            )
             form.add_error(None, str(exc))
             return self.form_invalid(form)
         self.profile.wuying_password = form.cleaned_data['new_password']
         self.profile.save(update_fields=['wuying_password'])
+        log_desktop(
+            self.request, None, "Set password",
+            details="Set a new Wuying password for {}.".format(self.profile.eds_end_user_id),
+            desktop_name=self.profile.user.username,
+        )
         messages.success(
             self.request,
             'New Wuying password set for {}. It is shown on the Users page.'.format(self.profile.eds_end_user_id),
@@ -602,14 +926,39 @@ class UserProfileDeleteView(GroupRequiredMixin, DashboardMixin, DeleteView):
             try:
                 remove_wuying_user(end_user_id)
             except AlibabaApiError as exc:
+                log_desktop(
+                    self.request, None, "API Error", details=str(exc),
+                    desktop_name=self.object.user.username,
+                )
                 form.add_error(None, str(exc))
                 return self.form_invalid(form)
+        log_desktop(
+            self.request, None, "Delete user",
+            old_value=end_user_id or "",
+            details="Removed the user profile and deleted the Wuying user in Alibaba." if remove else "Removed the user profile. The Wuying user is still in Alibaba.",
+            desktop_name=self.object.user.username,
+        )
         if remove:
             messages.success(self.request, 'User profile removed and Wuying user deleted in Alibaba.')
         else:
             messages.success(self.request, 'User profile removed. The Wuying user is still in Alibaba.')
 
         return super(UserProfileDeleteView, self).form_valid(form)
+
+class GuidanceView(GroupRequiredMixin, DashboardMixin, TemplateView):
+    group_required = ['superadmin']
+    template_name = "view_dashboards/_group_dashboard/superadmin/guidance.html"
+
+    def get_context_data(self, **kwargs):
+        context = super(GuidanceView, self).get_context_data(**kwargs)
+        context["page_title"] = "Guidance"
+        context["main_nav"] = "guidance"
+        context["wuying_download_url"] = WUYING_DOWNLOAD_URL
+        context["wuying_web_url"] = WUYING_WEB_URL
+        directory_id = settings.DIRECTORY_ID
+        context["office_network_id"] = directory_id if directory_id and directory_id != "xxxx" else ""
+        return context
+
 
 class ActivityLogListView(GroupRequiredMixin, DashboardMixin, ListView):
     group_required = ['superadmin']
@@ -636,12 +985,35 @@ POWER_ACTIONS = {
 }
 
 
+class DesktopProgressView(GroupRequiredMixin, DashboardMixin, View):
+    group_required = ['superadmin']
+
+    def get(self, request, *args, **kwargs):
+        busy = VirtualMachine.objects.filter(status__in=BUSY_STATUSES, vm_id__gt="").exists()
+        if busy:
+            try:
+                for desktop in describe_desktops():
+                    apply_desktop(desktop)
+            except AlibabaApiError as exc:
+                return JsonResponse({"detail": str(exc)}, status=502)
+        rows = []
+        for vm in VirtualMachine.objects.all():
+            rows.append({
+                "id": vm.pk,
+                "status": vm.status,
+                "label": vm.get_status_display(),
+                "busy": vm.status in BUSY_STATUSES,
+            })
+        return JsonResponse({"desktops": rows})
+
+
 class DesktopSyncView(GroupRequiredMixin, DashboardMixin, View):
     group_required = ['superadmin']
     def post(self, request, *args, **kwargs):
         try:
             desktops = describe_desktops()
         except AlibabaApiError as exc:
+            log_desktop(request, None, "API Error", details=str(exc), desktop_name="All desktops")
             messages.error(request, str(exc))
             return HttpResponseRedirect(reverse("view_dashboards:desktop_list"))
 
@@ -649,6 +1021,11 @@ class DesktopSyncView(GroupRequiredMixin, DashboardMixin, View):
         for desktop in desktops:
             if apply_desktop(desktop):
                 saved += 1
+        log_desktop(
+            request, None, "Sync",
+            details="Synced {} desktop(s) from Alibaba.".format(saved),
+            desktop_name="All desktops",
+        )
         messages.success(request, "Synced {} desktop(s) from Alibaba.".format(saved))
         return HttpResponseRedirect(reverse("view_dashboards:desktop_list"))
 
@@ -680,13 +1057,23 @@ class DesktopDeleteView(GroupRequiredMixin, DashboardMixin, DeleteView):
                 message = str(exc).lower()
                 missing = "notfound" in code or "not found" in message or "not exist" in message
                 if not missing:
+                    log_desktop(self.request, vm, "API Error", details=str(exc))
                     messages.error(self.request, str(exc))
                     return HttpResponseRedirect(reverse("view_dashboards:desktop_delete", args=[vm.pk]))
                 removed_from_cloud = False
         if removed_from_cloud:
+            details = "Released the computer on Alibaba and removed it from the dashboard."
             messages.success(self.request, "Desktop removed from Alibaba and this dashboard.")
         else:
+            details = "Removed the dashboard record."
             messages.success(self.request, "Desktop removed from this dashboard.")
+        log_desktop(
+            self.request,
+            vm,
+            "Delete",
+            old_value=spec_summary(vm.desktop_type, vm.system_disk, vm.data_disk),
+            details=details,
+        )
         return super(DesktopDeleteView, self).form_valid(form)
 
 
