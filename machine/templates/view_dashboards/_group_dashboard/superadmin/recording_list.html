@@ -1,0 +1,165 @@
+{% extends "view_dashboards/base.html" %}
+{% load dashboard_time %}
+
+{% block extra_css %}
+<style>
+    .recording-player {
+        background: #07140f;
+        color: #ffffff;
+        border: 0;
+        overflow: hidden;
+    }
+    .recording-player .modal-header {
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .recording-player .modal-title {
+        font-size: 1rem;
+        font-weight: 600;
+    }
+    .recording-player .btn-close {
+        filter: invert(1);
+    }
+    button.btn-table-action {
+        cursor: pointer;
+        font-family: inherit;
+    }
+    #recordingPlayerVideo {
+        display: block;
+        width: 100%;
+        max-height: 70vh;
+        background: #000000;
+    }
+</style>
+{% endblock extra_css %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Recordings</h1>
+        <p class="page-subtitle">Screen recordings from Wuying. Play watches the video here. Download saves the file.</p>
+    </div>
+</div>
+
+<form method="get" class="d-flex flex-wrap gap-2 mb-3">
+    <select class="form-select" name="user" aria-label="Wuying user" style="max-width: 16rem;">
+        <option value="">All users</option>
+        {% for profile in wuying_users %}
+            <option value="{{ profile.eds_end_user_id }}" {% if selected_user == profile.eds_end_user_id %}selected{% endif %}>
+                {{ profile.eds_end_user_id }}{% if profile.user.username %} ({{ profile.user.username }}){% endif %}
+            </option>
+        {% endfor %}
+    </select>
+    <select class="form-select" name="desktop" aria-label="Computer" style="max-width: 16rem;">
+        <option value="">All computers</option>
+        {% for desktop in desktops %}
+            <option value="{{ desktop.vm_id }}" {% if selected_desktop == desktop.vm_id %}selected{% endif %}>
+                {{ desktop.name|default:desktop.vm_id }}
+            </option>
+        {% endfor %}
+    </select>
+    <select class="form-select" name="days" aria-label="Time range" style="max-width: 10rem;">
+        <option value="7" {% if days == "7" %}selected{% endif %}>Last 7 days</option>
+        <option value="30" {% if days == "30" %}selected{% endif %}>Last 30 days</option>
+    </select>
+    <button class="btn btn-dark btn-sm" type="submit">Show</button>
+</form>
+
+{% if recording_error %}
+<div class="alert alert-warning">Could not load recordings from Alibaba: {{ recording_error }}</div>
+{% endif %}
+
+<div class="table-card-custom">
+    <div class="table-responsive">
+        <table class="table-custom">
+            <thead>
+                <tr>
+                    <th>Started</th>
+                    <th>Ended</th>
+                    <th>User</th>
+                    <th>Computer</th>
+                    <th>Size</th>
+                    <th>Video</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for recording in recordings %}
+                <tr>
+                    <td>{{ recording.started|dash_datetime|default:"-" }}</td>
+                    <td>{{ recording.finished|dash_datetime|default:"-" }}</td>
+                    <td>
+                        <div class="table-user-name">{{ recording.end_user_id|default:"-" }}</div>
+                        {% if recording.username %}<div class="table-user-sub">{{ recording.username }}</div>{% endif %}
+                    </td>
+                    <td>
+                        {% if recording.desktop %}
+                            <a href="{% url 'view_dashboards:desktop_detail' recording.desktop.pk %}">{{ recording.desktop_name|default:recording.desktop.name }}</a>
+                        {% else %}
+                            <div class="table-user-name">{{ recording.desktop_name|default:"Computer" }}</div>
+                        {% endif %}
+                        {% if recording.desktop_id %}<div class="table-user-sub">{{ recording.desktop_id }}</div>{% endif %}
+                    </td>
+                    <td>{{ recording.size_label }}</td>
+                    <td>
+                        {% if recording.file_path %}
+                            <div class="d-flex flex-wrap gap-2">
+                                <button
+                                    type="button"
+                                    class="btn-table-action"
+                                    data-recording-play="{% url 'view_dashboards:recording_media' %}?path={{ recording.file_path|urlencode }}"
+                                    data-recording-title="{{ recording.desktop_name|default:'Recording' }}{% if recording.started %} · {{ recording.started|dash_datetime }}{% endif %}"
+                                ><i class="bi bi-play-fill" aria-hidden="true"></i> Play</button>
+                                <a class="btn-table-action" href="{% url 'view_dashboards:recording_media' %}?path={{ recording.file_path|urlencode }}&amp;download=1"><i class="bi bi-download" aria-hidden="true"></i> Download</a>
+                            </div>
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="6" class="text-muted-green">No recordings in this period. A video appears after the person leaves and the computer stays running long enough to upload it.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="modal fade" id="recordingPlayer" tabindex="-1" aria-labelledby="recordingPlayerTitle" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content recording-player">
+            <div class="modal-header">
+                <h2 class="modal-title" id="recordingPlayerTitle">Recording</h2>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body p-0">
+                <video id="recordingPlayerVideo" controls playsinline preload="metadata"></video>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock content %}
+
+{% block extra_js %}
+<script>
+    const recordingModal = document.getElementById("recordingPlayer");
+    const recordingVideo = document.getElementById("recordingPlayerVideo");
+    const recordingDialog = new bootstrap.Modal(recordingModal);
+    document.querySelectorAll("[data-recording-play]").forEach(function (button) {
+        button.addEventListener("click", function () {
+            document.getElementById("recordingPlayerTitle").textContent = button.getAttribute("data-recording-title") || "Recording";
+            recordingVideo.src = button.getAttribute("data-recording-play");
+            recordingDialog.show();
+            const started = recordingVideo.play();
+            if (started) {
+                started.catch(function () {});
+            }
+        });
+    });
+    recordingModal.addEventListener("hidden.bs.modal", function () {
+        recordingVideo.pause();
+        recordingVideo.removeAttribute("src");
+        recordingVideo.load();
+    });
+</script>
+{% endblock extra_js %}

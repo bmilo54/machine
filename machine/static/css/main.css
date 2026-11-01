@@ -2369,9 +2369,28 @@ span.flatpickr-weekday {
     transition: all 0.2s ease-in-out;
 }
 
-.btn-table-action:hover {
-    background-color: #F8FAF9;
-    border-color: var(--brand-forest-medium);
+a.btn-table-action:hover,
+button.btn-table-action:hover,
+a.btn-dark:hover,
+button.btn-dark:hover,
+a.btn-outline-dark:hover,
+button.btn-outline-dark:hover,
+a.btn-outline-secondary:hover,
+button.btn-outline-secondary:hover {
+    background-color: var(--brand-forest-dark);
+    border-color: var(--brand-forest-dark);
+    color: #ffffff;
+}
+
+a.btn-table-action:hover i,
+button.btn-table-action:hover i,
+a.btn-dark:hover i,
+button.btn-dark:hover i,
+a.btn-outline-dark:hover i,
+button.btn-outline-dark:hover i,
+a.btn-outline-secondary:hover i,
+button.btn-outline-secondary:hover i {
+    color: #ffffff;
 }
 
 /* Action button items in table cell */
@@ -2390,22 +2409,23 @@ span.flatpickr-weekday {
     text-decoration: none;
 }
 
-.table-btn-action:hover {
-    background-color: var(--brand-forest-medium);
-    color: #FFFFFF;
-    border-color: var(--brand-forest-medium);
+.table-btn-action:hover,
+.table-btn-action.bg-transparent:hover {
+    background-color: var(--brand-forest-dark);
+    color: #ffffff;
+    border-color: var(--brand-forest-dark);
 }
 
-.table-btn-action.bg-transparent:hover {
-    background-color: var(--sys-green-bg) !important;
-    border-color: transparent;
-    color: var(--brand-forest-medium);
+.table-btn-action.table-btn-detail:hover {
+    background-color: var(--bs-secondary);
+    color: #ffffff;
+    border-color: var(--bs-secondary);
 }
 
 .table-btn-action.delete:hover {
-    background-color: var(--sys-red);
-    color: #FFFFFF;
-    border-color: var(--sys-red);
+    background-color: var(--bs-danger);
+    color: #ffffff;
+    border-color: var(--bs-danger);
 }
 
 /* Table Footer Pagination */

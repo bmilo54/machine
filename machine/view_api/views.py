@@ -4,7 +4,7 @@ import hmac
 import json
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -42,7 +42,7 @@ WINDOWS_11_PRO_IMAGE_ID = "desktopimage-windows-11-64-asp"
 WINDOWS_11_PRO_GPU_IMAGE_ID = "desktopimage-windows-11-64-asp-gpu"
 WINDOWS_LANGUAGE = "en-US"
 DEFAULT_DESKTOP_TYPE = "eds.general.4c8g"
-DEFAULT_POLICY_GROUP_ID = "system-all-enabled-policy"
+FALLBACK_POLICY_GROUP_ID = "system-all-enabled-policy"
 STATUS_FROM_CLOUD = {
     "Running": "Running",
     "Stopped": "Stopped",
@@ -240,6 +240,31 @@ def desktop_id_from(payload):
     return str(desktop_id).strip().strip('[]"')
 
 
+def desktop_policy_id():
+    policy_id = (getattr(settings, "POLICY_GROUP_ID", "") or "").strip()
+    if not policy_id or policy_id == "xxxx":
+        return FALLBACK_POLICY_GROUP_ID
+    return policy_id
+
+
+def desktop_policy_name():
+    policy_id = desktop_policy_id()
+    cache_key = "ecd-policy-name:{}".format(policy_id)
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+    try:
+        payload = call_ecd("DescribePolicyGroups", {"PolicyGroupId": policy_id, "MaxResults": 20})
+    except AlibabaApiError:
+        return policy_id
+    for group in payload.get("DescribePolicyGroups") or []:
+        if group.get("PolicyGroupId") == policy_id:
+            name = group.get("Name") or policy_id
+            cache.set(cache_key, name, 60 * 60)
+            return name
+    return policy_id
+
+
 def create_cloud_desktop(name, profile=None, end_user_id=""):
     if not DIRECTORY_ID or DIRECTORY_ID == "xxxx":
         raise AlibabaApiError("Set DIRECTORY_ID in local settings to the Hangzhou office network.")
@@ -265,7 +290,7 @@ def create_cloud_desktop(name, profile=None, end_user_id=""):
         "DesktopName": name,
         "Amount": 1,
         "OfficeSiteId": DIRECTORY_ID,
-        "PolicyGroupId": DEFAULT_POLICY_GROUP_ID,
+        "PolicyGroupId": desktop_policy_id(),
         "ChargeType": "PostPaid",
         "BundleId": bundle_id,
     }
@@ -425,6 +450,47 @@ def refresh_desktop(vm):
         apply_desktop(desktops[0])
         vm.refresh_from_db()
     return vm
+
+
+def describe_recordings(start, end, desktop_id=""):
+    extra = {
+        "MaxResults": 100,
+        "NeedSignedUrl": True,
+        "SignedUrlExpireMinutes": 60,
+        "StandardStartTime": start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "StandardEndTime": end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if desktop_id:
+        extra["DesktopId"] = desktop_id
+    recordings = []
+    next_token = ""
+    for _ in range(5):
+        params = dict(extra)
+        if next_token:
+            params["NextToken"] = next_token
+        payload = call_ecd("DescribeRecordings", params)
+        recordings.extend(payload.get("Recordings") or [])
+        next_token = payload.get("NextToken") or ""
+        if not next_token:
+            break
+    return recordings
+
+
+def recording_signed_url(file_path):
+    cache_key = "ecd-recording-url:{}".format(hashlib.sha256(file_path.encode("utf-8")).hexdigest())
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=30)
+    for item in describe_recordings(start, end):
+        if (item.get("FilePath") or "") != file_path:
+            continue
+        signed_url = item.get("SignedUrl") or ""
+        if signed_url:
+            cache.set(cache_key, signed_url, 50 * 60)
+        return signed_url
+    return ""
 
 
 def describe_desktops():

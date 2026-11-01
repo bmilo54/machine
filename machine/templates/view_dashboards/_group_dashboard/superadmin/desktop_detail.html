@@ -62,8 +62,12 @@
     }
     a.desktop-action:hover,
     button.desktop-action:hover {
-        background: var(--sys-green-bg);
-        color: var(--brand-forest-dark);
+        background: var(--brand-forest-dark);
+        color: #ffffff;
+    }
+    a.desktop-action:hover i,
+    button.desktop-action:hover i {
+        color: #ffffff;
     }
     .desktop-action-primary {
         background: var(--brand-forest-dark);
@@ -71,17 +75,17 @@
     }
     a.desktop-action-primary:hover,
     button.desktop-action-primary:hover {
-        background: var(--brand-forest-medium);
-        color: #fff;
+        background: var(--brand-forest-light);
+        color: #ffffff;
     }
     a.desktop-action-danger,
     button.desktop-action-danger {
-        color: #B91C1C;
+        color: var(--bs-danger);
     }
     a.desktop-action-danger:hover,
     button.desktop-action-danger:hover {
-        background: var(--sys-red-bg);
-        color: #B91C1C;
+        background: var(--bs-danger);
+        color: #ffffff;
     }
 </style>
 {% endblock extra_css %}

@@ -92,7 +92,7 @@
                             <i class="bi bi-clipboard"></i>
                         </button>
                         {% endif %}
-                        <a class="table-btn-action" href="{% url 'view_dashboards:desktop_detail' desktop.pk %}" title="View details">
+                        <a class="table-btn-action table-btn-detail" href="{% url 'view_dashboards:desktop_detail' desktop.pk %}" title="View details">
                             <i class="bi bi-eye"></i>
                         </a>
                         <a class="table-btn-action" href="{% url 'view_dashboards:desktop_spec' desktop.pk %}" title="Change specifications">
@@ -101,7 +101,7 @@
                         <a class="table-btn-action" href="{% url 'view_dashboards:desktop_update' desktop.pk %}" title="Edit">
                             <i class="bi bi-pencil"></i>
                         </a>
-                        <a class="table-btn-action" href="{% url 'view_dashboards:desktop_delete' desktop.pk %}" title="Delete">
+                        <a class="table-btn-action delete" href="{% url 'view_dashboards:desktop_delete' desktop.pk %}" title="Delete">
                             <i class="bi bi-trash"></i>
                         </a>
                     </td>

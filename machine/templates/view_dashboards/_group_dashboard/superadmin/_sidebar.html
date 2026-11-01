@@ -32,6 +32,12 @@
             </a>
         </li>
         <li class="sidebar-menu-item">
+            <a href="{% url 'view_dashboards:recording_list' %}" class="sidebar-menu-link {% if main_nav == 'recordings' %}active{% endif %}" title="Recordings">
+                <i class="bi bi-camera-video"></i>
+                <span>Recordings</span>
+            </a>
+        </li>
+        <li class="sidebar-menu-item">
             <a href="{% url 'view_dashboards:activity_list' %}" class="sidebar-menu-link {% if main_nav == 'activity' %}active{% endif %}" title="Activity">
                 <i class="bi bi-clock-history"></i>
                 <span>Activity</span>

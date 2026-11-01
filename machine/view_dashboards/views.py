@@ -1,6 +1,10 @@
 import base64
 import logging
+import re
 from datetime import timedelta
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from django.shortcuts import get_object_or_404
 from django.views.generic.edit import CreateView, FormView, UpdateView, DeleteView
@@ -14,7 +18,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.debug import sensitive_post_parameters
-from django.http import HttpResponseRedirect, HttpResponse, JsonResponse
+from django.http import Http404, HttpResponse, HttpResponseRedirect, JsonResponse, StreamingHttpResponse
 from django.contrib import messages
 from django.db.models import Count, Q
 from django.conf import settings
@@ -38,6 +42,8 @@ from view_api.views import (
     create_wuying_user,
     delete_cloud_desktop,
     describe_desktops,
+    describe_recordings,
+    recording_signed_url,
     refresh_desktop,
     describe_signin_events,
     describe_wuying_users,
@@ -45,6 +51,7 @@ from view_api.views import (
     SIGNIN_EVENT_LABELS,
     change_wuying_password,
     desktop_hourly_price,
+    desktop_policy_name,
     modify_desktop_spec,
     remove_wuying_user,
     operate_desktop,
@@ -485,7 +492,7 @@ class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
     group_required = ['superadmin']
     model = VirtualMachine
     form_class = DesktopCreateForm
-    page_subtitle = 'Purchases a Windows 11 Pro computer in China (Hangzhou). Alibaba bills it pay-as-you-go.'
+    page_subtitle = 'Purchases a Windows 11 Pro computer in Singapore. Alibaba bills it pay-as-you-go.'
     cancel_url_name = 'view_dashboards:desktop_list'
 
     def get_context_data(self, **kwargs):
@@ -493,6 +500,10 @@ class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
         context['page_title'] = 'Create cloud computer'
         context['main_nav'] = 'desktops'
         context['submit_label'] = 'Create cloud computer'
+        context['page_subtitle'] = (
+            'Purchases a Windows 11 Pro computer in Singapore and applies the policy {}. '
+            'Alibaba bills it pay-as-you-go.'
+        ).format(desktop_policy_name())
         return context
 
     def form_valid(self, form):
@@ -1085,6 +1096,141 @@ class SignInHistoryView(GroupRequiredMixin, DashboardMixin, TemplateView):
         return context
 
 
+class RecordingListView(GroupRequiredMixin, DashboardMixin, TemplateView):
+    group_required = ['superadmin']
+    template_name = "view_dashboards/_group_dashboard/superadmin/recording_list.html"
+
+    def get_context_data(self, **kwargs):
+        context = super(RecordingListView, self).get_context_data(**kwargs)
+        context["page_title"] = "Recordings"
+        context["main_nav"] = "recordings"
+        days = self.request.GET.get("days", "7")
+        if days not in ("7", "30"):
+            days = "7"
+        selected_user = (self.request.GET.get("user") or "").strip()
+        selected_desktop = (self.request.GET.get("desktop") or "").strip()
+        profiles = list(
+            Profile.objects.exclude(eds_end_user_id__isnull=True)
+            .exclude(eds_end_user_id="")
+            .select_related("user")
+            .order_by("eds_end_user_id")
+        )
+        desktops = list(VirtualMachine.objects.exclude(vm_id__isnull=True).exclude(vm_id="").order_by("name"))
+        known_ids = {profile.eds_end_user_id for profile in profiles}
+        known_desktops = {desktop.vm_id for desktop in desktops}
+        if selected_user and selected_user not in known_ids:
+            selected_user = ""
+        if selected_desktop and selected_desktop not in known_desktops:
+            selected_desktop = ""
+        context["days"] = days
+        context["selected_user"] = selected_user
+        context["selected_desktop"] = selected_desktop
+        context["wuying_users"] = profiles
+        context["desktops"] = desktops
+        context["recording_error"] = ""
+        context["recordings"] = []
+
+        end = timezone.now()
+        start = end - timedelta(days=int(days))
+        try:
+            raw_recordings = describe_recordings(start, end, selected_desktop)
+        except AlibabaApiError as exc:
+            context["recording_error"] = str(exc)
+            return context
+
+        names = {profile.eds_end_user_id: profile.user.username for profile in profiles}
+        desktop_links = {desktop.vm_id: desktop for desktop in desktops}
+        rows = []
+        for item in raw_recordings:
+            end_user_ids = item.get("EndUserIds") or []
+            if isinstance(end_user_ids, str):
+                end_user_ids = [end_user_ids]
+            end_user_id = end_user_ids[0] if end_user_ids else ""
+            if selected_user and selected_user not in end_user_ids:
+                continue
+            started = parse_alibaba_time(item.get("StartTime"))
+            finished = parse_alibaba_time(item.get("EndTime"))
+            size = int(item.get("RecordingSize") or 0)
+            if size >= 1024 * 1024:
+                size_label = "{:.1f} MB".format(size / (1024 * 1024))
+            elif size >= 1024:
+                size_label = "{:.0f} KB".format(size / 1024)
+            else:
+                size_label = "{} B".format(size)
+            desktop_id = item.get("DesktopId") or ""
+            rows.append({
+                "started": started,
+                "finished": finished,
+                "end_user_id": end_user_id,
+                "username": names.get(end_user_id, ""),
+                "desktop_name": item.get("DesktopName") or "",
+                "desktop_id": desktop_id,
+                "desktop": desktop_links.get(desktop_id),
+                "size_label": size_label,
+                "file_path": item.get("FilePath") or "",
+            })
+        rows.sort(key=lambda row: row["started"] or start, reverse=True)
+        context["recordings"] = rows
+        return context
+
+
+RECORDING_PATH = re.compile(r"^[A-Za-z0-9_./+-]+\.mp4$")
+
+
+class RecordingMediaView(GroupRequiredMixin, DashboardMixin, View):
+    group_required = ['superadmin']
+
+    def get(self, request, *args, **kwargs):
+        file_path = (request.GET.get("path") or "").strip()
+        if not RECORDING_PATH.match(file_path) or ".." in file_path:
+            raise Http404
+        signed_url = recording_signed_url(file_path)
+        parsed = urlparse(signed_url)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or not (
+            host.endswith(".aliyuncs.com") or host.endswith(".alibabacloud.com")
+        ):
+            raise Http404
+
+        headers = {"User-Agent": "machine-dashboard"}
+        range_header = request.META.get("HTTP_RANGE")
+        if range_header:
+            headers["Range"] = range_header
+        try:
+            upstream = urlopen(Request(signed_url, headers=headers), timeout=60)
+        except (HTTPError, URLError):
+            return HttpResponse(
+                "The recording could not be opened. Refresh Recordings and try again.",
+                status=502,
+                content_type="text/plain",
+            )
+
+        filename = file_path.rsplit("/", 1)[-1].replace('"', "")
+        disposition = "attachment" if request.GET.get("download") == "1" else "inline"
+
+        def chunks():
+            try:
+                while True:
+                    block = upstream.read(64 * 1024)
+                    if not block:
+                        break
+                    yield block
+            finally:
+                upstream.close()
+
+        response = StreamingHttpResponse(chunks(), status=upstream.status, content_type="video/mp4")
+        response["Content-Disposition"] = '{}; filename="{}"'.format(disposition, filename)
+        response["Accept-Ranges"] = "bytes"
+        response["Cache-Control"] = "private, no-store"
+        content_length = upstream.headers.get("Content-Length")
+        content_range = upstream.headers.get("Content-Range")
+        if content_length:
+            response["Content-Length"] = content_length
+        if content_range:
+            response["Content-Range"] = content_range
+        return response
+
+
 class GuidanceView(GroupRequiredMixin, DashboardMixin, TemplateView):
     group_required = ['superadmin']
     template_name = "view_dashboards/_group_dashboard/superadmin/guidance.html"
@@ -1095,6 +1241,7 @@ class GuidanceView(GroupRequiredMixin, DashboardMixin, TemplateView):
         context["main_nav"] = "guidance"
         context["wuying_download_url"] = WUYING_DOWNLOAD_URL
         context["wuying_web_url"] = WUYING_WEB_URL
+        context["recording_policy_name"] = desktop_policy_name()
         directory_id = settings.DIRECTORY_ID
         context["office_network_id"] = directory_id if directory_id and directory_id != "xxxx" else ""
 

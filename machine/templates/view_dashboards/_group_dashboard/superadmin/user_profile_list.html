@@ -84,7 +84,7 @@
                         </a>
                         {% endif %}
                         {% if account.pk != request.user.pk %}
-                        <a class="table-btn-action" href="{% url 'view_dashboards:user_profile_delete' account.pk %}" title="Delete">
+                        <a class="table-btn-action delete" href="{% url 'view_dashboards:user_profile_delete' account.pk %}" title="Delete">
                             <i class="bi bi-trash"></i>
                         </a>
                         {% endif %}
