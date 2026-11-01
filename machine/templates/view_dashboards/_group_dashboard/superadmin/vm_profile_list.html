@@ -30,7 +30,7 @@
                     <td>{{ profile.desktop_type_group|default:"Not set" }}</td>
                     <td>{{ profile.cpu|default:"-" }}</td>
                     <td>{{ profile.ram|default:"-" }} GB</td>
-                    <td>{% if profile.gpu %}{{ profile.gpu }} GB{% else %}None{% endif %}</td>
+                    <td>{% if profile.gpu %}{{ profile.gpu_card_name }}, {{ profile.gpu }} GB{% else %}None{% endif %}</td>
                     <td>{{ profile.system_disk|default:"-" }} / {{ profile.data_disk|default:"0" }} GB</td>
                     <td class="text-center">
                         <a class="table-btn-action" href="{% url 'view_dashboards:vm_profile_update' profile.pk %}" title="Edit">

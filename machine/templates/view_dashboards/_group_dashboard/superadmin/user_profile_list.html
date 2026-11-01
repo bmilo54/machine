@@ -76,6 +76,9 @@
                             <i class="bi bi-pencil"></i>
                         </a>
                         {% if account.profile.eds_end_user_id %}
+                        <a class="table-btn-action" href="{% url 'view_dashboards:signin_history' %}?user={{ account.profile.eds_end_user_id }}" title="Sign-in history">
+                            <i class="bi bi-clock-history"></i>
+                        </a>
                         <a class="table-btn-action" href="{% url 'view_dashboards:user_profile_password' account.pk %}" title="Set Wuying password">
                             <i class="bi bi-key"></i>
                         </a>

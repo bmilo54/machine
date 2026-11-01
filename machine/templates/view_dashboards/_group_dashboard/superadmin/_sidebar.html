@@ -26,6 +26,12 @@
             </a>
         </li>
         <li class="sidebar-menu-item">
+            <a href="{% url 'view_dashboards:signin_history' %}" class="sidebar-menu-link {% if main_nav == 'signin' %}active{% endif %}" title="Sign-in">
+                <i class="bi bi-box-arrow-in-right"></i>
+                <span>Sign-in</span>
+            </a>
+        </li>
+        <li class="sidebar-menu-item">
             <a href="{% url 'view_dashboards:activity_list' %}" class="sidebar-menu-link {% if main_nav == 'activity' %}active{% endif %}" title="Activity">
                 <i class="bi bi-clock-history"></i>
                 <span>Activity</span>

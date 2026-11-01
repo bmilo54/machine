@@ -40,7 +40,8 @@ WUYING_WEB_URL = "https://workspace.alibabacloud.com"
 EDS_USER_HOST = getattr(settings, "EDS_USER_HOST", "eds-user.ap-southeast-1.aliyuncs.com")
 WINDOWS_11_PRO_IMAGE_ID = "desktopimage-windows-11-64-asp"
 WINDOWS_11_PRO_GPU_IMAGE_ID = "desktopimage-windows-11-64-asp-gpu"
-DEFAULT_DESKTOP_TYPE = "eds.enterprise_office.6c12g"
+WINDOWS_LANGUAGE = "en-US"
+DEFAULT_DESKTOP_TYPE = "eds.general.4c8g"
 DEFAULT_POLICY_GROUP_ID = "system-all-enabled-policy"
 STATUS_FROM_CLOUD = {
     "Running": "Running",
@@ -49,7 +50,8 @@ STATUS_FROM_CLOUD = {
     "Stopping": "Stopping",
     "Pending": "Creating",
     "Rebuilding": "Creating",
-    "Updating": "Updating",
+    "Updating": "Upgrading",
+    "Upgrading": "Upgrading",
     "Expired": "Error",
     "Deleted": "Error",
 }
@@ -192,6 +194,8 @@ def find_windows_bundle(bundles, image_id, desktop_type, system_disk, data_disk)
             continue
         if bundle.get("DesktopType") != desktop_type:
             continue
+        if bundle.get("Language") != WINDOWS_LANGUAGE:
+            continue
         disks = bundle_disks(bundle)
         if disks.get("SYSTEM") == system_disk and disks.get("DATA", 0) == data_disk:
             return bundle.get("BundleId") or ""
@@ -206,7 +210,7 @@ def ensure_windows_bundle(bundles, image_id, desktop_type, system_disk, data_dis
     payload = call_ecd(
         "CreateBundle",
         {
-            "BundleName": "win11-{}-s{}-d{}".format(
+            "BundleName": "win11-en-{}-s{}-d{}".format(
                 desktop_type.split(".", 1)[-1].replace(".", "-"),
                 system_disk,
                 data_disk,
@@ -215,7 +219,7 @@ def ensure_windows_bundle(bundles, image_id, desktop_type, system_disk, data_dis
             "DesktopType": desktop_type,
             "RootDiskSizeGib": system_disk,
             "UserDiskSizeGib.1": data_disk,
-            "Language": "zh-CN",
+            "Language": WINDOWS_LANGUAGE,
         },
     )
     bundle_id = (payload.get("BundleId") or "").strip()
@@ -279,7 +283,7 @@ def create_cloud_desktop(name, profile=None, end_user_id=""):
     }
 
 
-BUSY_STATUSES = ("Creating", "Starting", "Stopping", "Updating")
+BUSY_STATUSES = ("Creating", "Starting", "Stopping", "Updating", "Upgrading")
 HOURS_IN_MONTH = 730
 
 
@@ -412,6 +416,17 @@ def create_wuying_user(end_user_id, email, password, display_name=""):
         )
 
 
+def refresh_desktop(vm):
+    if vm is None or not vm.vm_id:
+        return vm
+    payload = call_ecd("DescribeDesktops", {"DesktopId.1": vm.vm_id, "MaxResults": 1})
+    desktops = payload.get("Desktops") or []
+    if desktops:
+        apply_desktop(desktops[0])
+        vm.refresh_from_db()
+    return vm
+
+
 def describe_desktops():
     desktops = []
     next_token = ""
@@ -427,6 +442,54 @@ def describe_desktops():
         if not next_token:
             break
     return desktops
+
+
+SIGNIN_EVENT_LABELS = {
+    "CLIENT_LOGIN": "Signed in",
+    "DESKTOP_CONNECT": "Opened the computer",
+    "DESKTOP_DISCONNECT": "Left the computer",
+}
+
+
+def parse_alibaba_time(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def describe_signin_events(start, end, end_user_id=""):
+    extra = {
+        "StartTime": start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "EndTime": end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "MaxResults": 100,
+        "EventTypes.1": "CLIENT_LOGIN",
+        "EventTypes.2": "DESKTOP_CONNECT",
+        "EventTypes.3": "DESKTOP_DISCONNECT",
+    }
+    if end_user_id:
+        extra["EndUserId"] = end_user_id
+
+    events = []
+    next_token = ""
+    for _ in range(5):
+        params = dict(extra)
+        if next_token:
+            params["NextToken"] = next_token
+        payload = call_ecd("DescribeClientEvents", params)
+        events.extend(payload.get("Events") or [])
+        next_token = payload.get("NextToken") or ""
+        if not next_token:
+            break
+    return events
 
 
 def memory_gb(value):

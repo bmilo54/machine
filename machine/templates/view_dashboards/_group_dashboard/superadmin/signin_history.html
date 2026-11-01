@@ -1,0 +1,72 @@
+{% extends "view_dashboards/base.html" %}
+{% load dashboard_time %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Sign-in</h1>
+        <p class="page-subtitle">When each person signed in to Wuying, opened a computer, and left it. Leaving the computer is the logout time.</p>
+    </div>
+</div>
+
+<form method="get" class="d-flex flex-wrap gap-2 mb-3">
+    <select class="form-select" name="user" aria-label="Wuying user" style="max-width: 16rem;">
+        <option value="">All users</option>
+        {% for profile in wuying_users %}
+            <option value="{{ profile.eds_end_user_id }}" {% if selected_user == profile.eds_end_user_id %}selected{% endif %}>
+                {{ profile.eds_end_user_id }}{% if profile.user.username %} ({{ profile.user.username }}){% endif %}
+            </option>
+        {% endfor %}
+    </select>
+    <select class="form-select" name="days" aria-label="Time range" style="max-width: 10rem;">
+        <option value="7" {% if days == "7" %}selected{% endif %}>Last 7 days</option>
+        <option value="30" {% if days == "30" %}selected{% endif %}>Last 30 days</option>
+    </select>
+    <button class="btn btn-dark btn-sm" type="submit">Show</button>
+</form>
+
+{% if signin_error %}
+<div class="alert alert-warning">Could not load sign-in history from Alibaba: {{ signin_error }}</div>
+{% endif %}
+
+<div class="table-card-custom">
+    <div class="table-responsive">
+        <table class="table-custom">
+            <thead>
+                <tr>
+                    <th>When</th>
+                    <th>User</th>
+                    <th>What happened</th>
+                    <th>Computer</th>
+                    <th>Client IP</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for event in signin_events %}
+                <tr>
+                    <td>{{ event.when|dash_datetime|default:"-" }}</td>
+                    <td>
+                        <div class="table-user-name">{{ event.end_user_id|default:"-" }}</div>
+                        {% if event.username %}<div class="table-user-sub">{{ event.username }}</div>{% endif %}
+                    </td>
+                    <td>{{ event.label }}</td>
+                    <td>
+                        {% if event.desktop_name or event.desktop_id %}
+                            <div class="table-user-name">{{ event.desktop_name|default:"Computer" }}</div>
+                            {% if event.desktop_id %}<div class="table-user-sub">{{ event.desktop_id }}</div>{% endif %}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>{{ event.client_ip|default:"-" }}</td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="5" class="text-muted-green">No sign-in or logout records in this period.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock content %}

@@ -63,6 +63,7 @@
                         <span class="badge-table {% if desktop.status == 'Running' %}success{% elif desktop.status == 'Error' %}failed{% else %}pending{% endif %}" data-desktop-badge="{{ desktop.pk }}">
                             {{ desktop.get_status_display }}
                         </span>
+                        <div class="text-muted-green small mt-1" data-desktop-note="{{ desktop.pk }}"{% if desktop.status != 'Upgrading' and desktop.status != 'Updating' %} style="display: none;"{% endif %}>Upgrading</div>
                         <div class="progress mt-2" data-desktop-bar="{{ desktop.pk }}" style="height: 6px;{% if desktop.status not in busy_statuses %} display: none;{% endif %}">
                             <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%; background-color: #072F1F;"></div>
                         </div>
@@ -157,15 +158,21 @@
                 (payload.desktops || []).forEach(function (row) {
                     var badge = document.querySelector('[data-desktop-badge="' + row.id + '"]');
                     var bar = document.querySelector('[data-desktop-bar="' + row.id + '"]');
+                    var note = document.querySelector('[data-desktop-note="' + row.id + '"]');
                     if (badge) {
                         badge.textContent = row.label;
                         badge.className = "badge-table " + badgeClass(row.status);
                     }
                     if (bar) bar.style.display = row.busy ? "" : "none";
+                    if (note) note.style.display = row.status === "Upgrading" || row.status === "Updating" ? "" : "none";
                     if (row.busy) stillBusy = true;
                 });
                 tries += 1;
-                if (stillBusy && tries < 150) setTimeout(tick, 8000);
+                if (!stillBusy) {
+                    window.location.reload();
+                    return;
+                }
+                if (tries < 150) setTimeout(tick, 8000);
             })
             .catch(function () {
                 if (tries < 150) setTimeout(tick, 8000);

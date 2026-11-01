@@ -69,7 +69,7 @@ class DesktopCreateForm(forms.ModelForm):
         self.fields["user"].help_text = "Optional. The desktop is assigned to this user in the dashboard."
         self.fields["current_profile"].required = False
         self.fields["current_profile"].queryset = VMProfile.objects.order_by("name")
-        self.fields["current_profile"].help_text = "Leave empty for 6 vCPU, 12 GB, an 80 GB system disk, and no data disk."
+        self.fields["current_profile"].help_text = "Leave empty for 4 vCPU, 8 GB, an 80 GB system disk, and no data disk."
 
     def clean_name(self):
         name = self.cleaned_data["name"].strip()
@@ -84,7 +84,7 @@ class DesktopSpecForm(forms.Form):
     desktop_type = forms.ChoiceField(
         label="Desktop type",
         choices=[],
-        help_text="CPU, memory, and GPU change together. Office types stay with office types, and graphics types stay with graphics types.",
+        help_text="CPU, memory, and GPU change together. A computer stays in its own family.",
     )
     system_disk = forms.IntegerField(
         label="System disk (GiB)",
@@ -142,7 +142,7 @@ class DesktopSpecForm(forms.Form):
                 "Stop this computer first. It is currently {}.".format(desktop.get_status_display())
             )
         if type_id != desktop.desktop_type and desktop_type_family(type_id) != family:
-            self.add_error("desktop_type", "Stay in the same family. Office stays with office, and graphics stays with graphics.")
+            self.add_error("desktop_type", "Stay in the same family. General Office, Graphics Workstation (Basic), and Professional Workstation each stay in their own list. Cloud Computer Graphics can only move to Graphics Workstation (Ultimate).")
         data_floor = SPEC_DATA_MIN.get(family, SPEC_DATA_MIN["office"])
         if not valid_grown_disk(system_disk, desktop.system_disk, SPEC_SYSTEM_MIN, SPEC_SYSTEM_MAX):
             self.add_error(
@@ -196,20 +196,24 @@ class VirtualMachineForm(forms.ModelForm):
 
 DESKTOP_TYPE_GUIDE = [
     {
-        "title": "Enterprise Office.",
-        "text": "Everyday work: browser, Office, email, and light applications. No GPU. This is the usual choice and the lower price.",
+        "title": "General Office.",
+        "text": "Everyday work: browser, Office, email, and light applications. No GPU. This is the Singapore office type and the lower price.",
     },
     {
-        "title": "High Frequency Office.",
-        "text": "The same kind of office work, with a faster CPU for programs that need more speed. No GPU. It costs more than Enterprise Office at a similar size.",
+        "title": "Cloud Computer Graphics.",
+        "text": "One size: 8 vCPU, 16 GiB memory, 4 GiB GPU. The GPU is an NVIDIA RTX 5880. It can later move up to Graphics Workstation (Ultimate).",
     },
     {
-        "title": "Graphics Workstation Pro.",
-        "text": "Design, 3D, and video. It includes a GPU. An office computer cannot be changed into this family later.",
+        "title": "Graphics Workstation (Ultimate).",
+        "text": "Design, 3D, and video. The GPU is an NVIDIA RTX 5880, from 8 to 24 GiB.",
     },
     {
-        "title": "AI Workstation Elite.",
-        "text": "Heavy GPU work. It has the largest GPU memory and the highest price. It stays in the graphics family.",
+        "title": "Professional Workstation.",
+        "text": "Heavy GPU and AI work. The GPU is an NVIDIA RTX 5880 with 48 GiB. Highest price. It cannot be changed into the other graphics families.",
+    },
+    {
+        "title": "Graphics Workstation (Basic).",
+        "text": "The lower graphics sizes. The GPU is an NVIDIA T4, from 2 to 16 GiB. It cannot be changed into an RTX 5880 computer.",
     },
 ]
 
@@ -248,8 +252,8 @@ class VMProfileForm(forms.ModelForm):
     instance_type_code = forms.ChoiceField(
         label="Desktop type",
         choices=DESKTOP_TYPE_CHOICES,
-        initial="eds.enterprise_office.6c12g",
-        help_text="Same hardware list as the Alibaba console. CPU, RAM, and GPU fill in from this type.",
+        initial="eds.general.4c8g",
+        help_text="Same list as the Singapore console. Cloud Computer Graphics, Graphics Workstation (Ultimate), and Professional Workstation use an NVIDIA RTX 5880. Graphics Workstation (Basic) uses an NVIDIA T4.",
     )
     system_disk = forms.IntegerField(
         label="System disk (GiB)",

@@ -137,14 +137,49 @@
     .dash-link:hover i {
         transform: translateX(4px);
     }
+    .cost-quote {
+        color: #072F1F;
+        font-size: 1.15rem;
+        font-weight: 700;
+        line-height: 1;
+        letter-spacing: -0.03em;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+    }
+    .cost-quote span {
+        display: block;
+        margin-top: 0.28rem;
+        color: #6b7280;
+        font-size: 0.65rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+    .cost-terminal {
+        margin: 0 1.25rem 0.85rem;
+        padding: 0.35rem 0.45rem 0.15rem;
+        border-radius: 12px;
+        background: #07140f;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+    }
     .cost-chart {
+        display: block;
         width: 100%;
         height: auto;
     }
     .cost-chart text {
-        fill: #6b7280;
+        fill: rgba(255, 255, 255, 0.62);
         font-size: 12px;
-        font-weight: 700;
+        font-weight: 500;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+    }
+    .cost-chart .cost-axis-title {
+        fill: rgba(255, 255, 255, 0.82);
+        font-size: 13px;
+        font-weight: 600;
+    }
+    .cost-note {
+        padding: 0 1.25rem 1.1rem;
     }
     .dash-activity tbody tr {
         animation: dashFade 0.45s cubic-bezier(0.22, 1, 0.36, 1) backwards;
@@ -266,25 +301,46 @@
             <h2 class="card-title mb-1">Cost used in {{ cost.month_label }}</h2>
             <p class="text-muted-green small mb-0">Pay-as-you-go estimate from the hours each computer was on.</p>
         </div>
-        <div class="metric-value mb-0">{{ cost.total_label }}</div>
+        <div class="cost-quote">{{ cost.total_label }}<span>Month to date</span></div>
     </div>
-    <svg class="cost-chart" viewBox="0 0 {{ cost.chart.width }} {{ cost.chart.height }}" role="img" aria-label="Cumulative cost line chart for {{ cost.month_label }}">
-        <line x1="{{ cost.chart.left }}" y1="16" x2="{{ cost.chart.left }}" y2="{{ cost.chart.baseline }}" stroke="#e5e7eb"></line>
-        <line x1="{{ cost.chart.left }}" y1="{{ cost.chart.baseline }}" x2="624" y2="{{ cost.chart.baseline }}" stroke="#e5e7eb"></line>
-        <text x="8" y="20">{{ cost.chart.peak_label }}</text>
-        <text x="8" y="{{ cost.chart.baseline }}">$0</text>
-        <polygon points="{{ cost.chart.area }}" fill="rgba(7, 47, 31, 0.12)"></polygon>
-        <polyline points="{{ cost.chart.line }}" fill="none" stroke="#072F1F" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"></polyline>
-        {% for point in cost.chart.coords %}
-            <circle cx="{{ point.x }}" cy="{{ point.y }}" r="3.5" fill="#072F1F">
-                <title>{{ point.label }}: {{ point.cumulative_label }}</title>
-            </circle>
-            {% if point.show_label %}
-                <text x="{{ point.x }}" y="{{ cost.chart.baseline|add:18 }}" text-anchor="{% if forloop.first %}start{% elif forloop.last %}end{% else %}middle{% endif %}">{{ point.label }}</text>
+    <div class="cost-terminal">
+        <svg class="cost-chart" viewBox="0 0 {{ cost.chart.width }} {{ cost.chart.height }}" role="img" aria-label="Cumulative cost line chart for {{ cost.month_label }}">
+            <defs>
+                <linearGradient id="costArea" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="#22C55E" stop-opacity="0.38"></stop>
+                    <stop offset="100%" stop-color="#22C55E" stop-opacity="0"></stop>
+                </linearGradient>
+            </defs>
+            <line x1="{{ cost.chart.left }}" y1="{{ cost.chart.top }}" x2="{{ cost.chart.left }}" y2="{{ cost.chart.baseline }}" stroke="rgba(255,255,255,0.22)" stroke-width="1"></line>
+            <line x1="{{ cost.chart.left }}" y1="{{ cost.chart.baseline }}" x2="{{ cost.chart.right }}" y2="{{ cost.chart.baseline }}" stroke="rgba(255,255,255,0.22)" stroke-width="1"></line>
+            {% for tick in cost.chart.ticks %}
+                <line x1="{{ cost.chart.left }}" y1="{{ tick.y }}" x2="{{ cost.chart.right }}" y2="{{ tick.y }}" stroke="rgba(255,255,255,0.08)" stroke-width="1"></line>
+                {% if tick.accent %}
+                    <rect x="{{ tick.box_x }}" y="{{ tick.y|add:'-9' }}" width="{{ tick.box_width }}" height="18" rx="4" fill="#16A34A"></rect>
+                {% endif %}
+            {% endfor %}
+            <polygon points="{{ cost.chart.area }}" fill="url(#costArea)"></polygon>
+            <polyline points="{{ cost.chart.line }}" fill="none" stroke="#4ADE80" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+            {% if cost.chart.last %}
+                <line x1="{{ cost.chart.last.x }}" y1="{{ cost.chart.top }}" x2="{{ cost.chart.last.x }}" y2="{{ cost.chart.baseline }}" stroke="rgba(74,222,128,0.35)" stroke-dasharray="3 4"></line>
+                <circle cx="{{ cost.chart.last.x }}" cy="{{ cost.chart.last.y }}" r="3.2" fill="#4ADE80"></circle>
             {% endif %}
-        {% endfor %}
-    </svg>
-    <p class="text-muted-green small mb-0">
+            <text class="cost-axis-title" x="{{ cost.chart.y_title_x }}" y="{{ cost.chart.y_title_y }}" text-anchor="middle" transform="rotate(-90 {{ cost.chart.y_title_x }} {{ cost.chart.y_title_y }})">Price usage</text>
+            {% for tick in cost.chart.ticks %}
+                <text x="{{ tick.label_x }}" y="{{ tick.y|add:'4' }}" text-anchor="end" {% if tick.accent %}fill="#ffffff" font-weight="600"{% endif %}>{{ tick.label }}</text>
+            {% endfor %}
+            {% for point in cost.chart.coords %}
+                <circle cx="{{ point.x }}" cy="{{ point.y }}" r="8" fill="transparent">
+                    <title>{{ point.label }} · {{ point.cumulative_label }}</title>
+                </circle>
+                {% if point.show_label %}
+                    <text x="{{ point.label_x }}" y="{{ cost.chart.baseline|add:20 }}" text-anchor="{{ point.anchor }}">{{ point.label }}</text>
+                {% endif %}
+            {% endfor %}
+            <text class="cost-axis-title" x="{{ cost.chart.x_title_x }}" y="{{ cost.chart.x_title_y }}" text-anchor="middle">Date</text>
+        </svg>
+    </div>
+    <p class="cost-note text-muted-green small mb-0">
         The line is the running total for this month. Each hour a computer is on is charged at its current hourly price.
         Stopping it stops the compute charge. Disks can still be billed while it is off, so the Alibaba invoice can be higher.
         {% if cost.unpriced %}{{ cost.unpriced }} desktop{{ cost.unpriced|pluralize }} still need a price. Sync from Alibaba.{% endif %}

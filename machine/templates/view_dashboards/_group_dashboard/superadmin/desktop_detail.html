@@ -1,35 +1,124 @@
 {% extends "view_dashboards/base.html" %}
 {% load dashboard_time %}
 
+{% block extra_css %}
+<style>
+    .desktop-header {
+        align-items: center;
+    }
+    .desktop-back {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        margin-bottom: 0.45rem;
+        color: var(--text-muted-green);
+        font-size: 0.8rem;
+        font-weight: 600;
+    }
+    .desktop-back:hover {
+        color: var(--brand-forest-dark);
+    }
+    .desktop-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.65rem;
+    }
+    .desktop-actions-group {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.2rem;
+        padding: 0.25rem;
+        background: #fff;
+        border: 1px solid rgba(11, 19, 15, 0.08);
+        border-radius: 12px;
+        box-shadow: var(--shadow-sm);
+    }
+    .desktop-actions form {
+        margin: 0;
+        display: flex;
+    }
+    .desktop-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.4rem;
+        height: 34px;
+        padding: 0 0.75rem;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--brand-forest-dark);
+        font-size: 0.8125rem;
+        font-weight: 600;
+        line-height: 1;
+        white-space: nowrap;
+        cursor: pointer;
+    }
+    .desktop-action i {
+        font-size: 0.95rem;
+        line-height: 1;
+    }
+    a.desktop-action:hover,
+    button.desktop-action:hover {
+        background: var(--sys-green-bg);
+        color: var(--brand-forest-dark);
+    }
+    .desktop-action-primary {
+        background: var(--brand-forest-dark);
+        color: #fff;
+    }
+    a.desktop-action-primary:hover,
+    button.desktop-action-primary:hover {
+        background: var(--brand-forest-medium);
+        color: #fff;
+    }
+    a.desktop-action-danger,
+    button.desktop-action-danger {
+        color: #B91C1C;
+    }
+    a.desktop-action-danger:hover,
+    button.desktop-action-danger:hover {
+        background: var(--sys-red-bg);
+        color: #B91C1C;
+    }
+</style>
+{% endblock extra_css %}
+
 {% block content %}
-<div class="page-header">
+<div class="page-header desktop-header">
     <div>
+        <a class="desktop-back" href="{% url 'view_dashboards:desktop_list' %}"><i class="bi bi-arrow-left" aria-hidden="true"></i> Desktops</a>
         <h1 class="page-title">{{ desktop.name|default:"Untitled" }}</h1>
         <p class="page-subtitle">{{ desktop.vm_id|default:"No cloud ID yet" }}</p>
     </div>
-    <div class="d-flex flex-wrap gap-2">
+    <div class="desktop-actions">
         {% if desktop.vm_id %}
+        <div class="desktop-actions-group">
             <form method="post" action="{% url 'view_dashboards:desktop_power' desktop.pk 'start' %}">
                 {% csrf_token %}
-                <button class="btn btn-dark btn-sm" type="submit">Start</button>
+                <button class="desktop-action desktop-action-primary" type="submit"><i class="bi bi-play-fill" aria-hidden="true"></i> Start</button>
             </form>
             <form method="post" action="{% url 'view_dashboards:desktop_power' desktop.pk 'stop' %}">
                 {% csrf_token %}
-                <button class="btn btn-outline-dark btn-sm" type="submit">Stop</button>
+                <button class="desktop-action" type="submit"><i class="bi bi-stop-fill" aria-hidden="true"></i> Stop</button>
             </form>
             <form method="post" action="{% url 'view_dashboards:desktop_power' desktop.pk 'restart' %}">
                 {% csrf_token %}
-                <button class="btn btn-outline-dark btn-sm" type="submit">Restart</button>
+                <button class="desktop-action" type="submit"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i> Restart</button>
             </form>
             <form method="post" action="{% url 'view_dashboards:desktop_connect' desktop.pk %}">
                 {% csrf_token %}
-                <button class="btn btn-outline-dark btn-sm" type="submit">Connect</button>
+                <button class="desktop-action" type="submit"><i class="bi bi-box-arrow-up-right" aria-hidden="true"></i> Connect</button>
             </form>
+        </div>
         {% endif %}
-        <a class="btn-table-action" href="{% url 'view_dashboards:desktop_spec' desktop.pk %}">Change specifications</a>
-        <a class="btn-table-action" href="{% url 'view_dashboards:desktop_update' desktop.pk %}">Edit</a>
-        <a class="btn btn-outline-danger btn-sm" href="{% url 'view_dashboards:desktop_delete' desktop.pk %}">Delete</a>
-        <a class="btn-table-action" href="{% url 'view_dashboards:desktop_list' %}">Back to list</a>
+        <div class="desktop-actions-group">
+            <a class="desktop-action" href="{% url 'view_dashboards:desktop_spec' desktop.pk %}"><i class="bi bi-sliders" aria-hidden="true"></i> Specifications</a>
+            <a class="desktop-action" href="{% url 'view_dashboards:desktop_update' desktop.pk %}"><i class="bi bi-pencil" aria-hidden="true"></i> Edit</a>
+            <a class="desktop-action desktop-action-danger" href="{% url 'view_dashboards:desktop_delete' desktop.pk %}"><i class="bi bi-trash" aria-hidden="true"></i> Delete</a>
+        </div>
     </div>
 </div>
 {% if not desktop.vm_id %}
@@ -46,6 +135,7 @@
                 <dt class="col-5">Status</dt>
                 <dd class="col-7" data-desktop-status="{{ desktop.pk }}">
                     <span data-desktop-badge="{{ desktop.pk }}">{{ desktop.get_status_display }}</span>
+                    <div class="text-muted-green small mt-1" data-desktop-note="{{ desktop.pk }}"{% if desktop.status != 'Upgrading' and desktop.status != 'Updating' %} style="display: none;"{% endif %}>Specification change in progress.</div>
                     <div class="progress mt-2" data-desktop-bar="{{ desktop.pk }}" style="height: 6px;{% if not desktop_busy %} display: none;{% endif %}">
                         <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%; background-color: #072F1F;"></div>
                     </div>
@@ -134,12 +224,18 @@
                 (payload.desktops || []).forEach(function (row) {
                     var badge = document.querySelector('[data-desktop-badge="' + row.id + '"]');
                     var bar = document.querySelector('[data-desktop-bar="' + row.id + '"]');
+                    var note = document.querySelector('[data-desktop-note="' + row.id + '"]');
                     if (badge) badge.textContent = row.label;
                     if (bar) bar.style.display = row.busy ? "" : "none";
+                    if (note) note.style.display = row.status === "Upgrading" || row.status === "Updating" ? "" : "none";
                     if (row.busy) stillBusy = true;
                 });
                 tries += 1;
-                if (stillBusy && tries < 150) setTimeout(tick, 8000);
+                if (!stillBusy) {
+                    window.location.reload();
+                    return;
+                }
+                if (tries < 150) setTimeout(tick, 8000);
             })
             .catch(function () {
                 if (tries < 150) setTimeout(tick, 8000);

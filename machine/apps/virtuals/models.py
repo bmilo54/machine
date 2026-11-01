@@ -1,7 +1,7 @@
 from django.contrib.auth.models import User
 from django.db import models
 
-from apps.virtuals.choices import ACTION_CHOICES, DESKTOP_TYPE_SPECS, STATUS_CHOICES
+from apps.virtuals.choices import ACTION_CHOICES, DESKTOP_TYPE_SPECS, STATUS_CHOICES, gpu_card_name
 from core.abstract_models import TimeStampedModel
 
 
@@ -17,7 +17,7 @@ class VMProfile(TimeStampedModel):
     data_disk = models.IntegerField(verbose_name="Data Disk (GB)", blank=True, null=True)
 
     # 阿里云无影对应的实际规格代码，非常重要
-    # 例如: eds.enterprise_office.2c8g
+    # 例如: eds.general.4c8g
     instance_type_code = models.CharField(verbose_name="Instance Type Code", max_length=255, blank=True, null=True, help_text="Alibaba ECD Actual Codes")
 
     class Meta:
@@ -31,6 +31,10 @@ class VMProfile(TimeStampedModel):
     def desktop_type_group(self):
         spec = DESKTOP_TYPE_SPECS.get(self.instance_type_code or "")
         return spec["group"] if spec else ""
+
+    @property
+    def gpu_card_name(self):
+        return gpu_card_name(self.instance_type_code)
 
 
 class VirtualMachine(TimeStampedModel):

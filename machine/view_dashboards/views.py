@@ -38,7 +38,11 @@ from view_api.views import (
     create_wuying_user,
     delete_cloud_desktop,
     describe_desktops,
+    refresh_desktop,
+    describe_signin_events,
     describe_wuying_users,
+    parse_alibaba_time,
+    SIGNIN_EVENT_LABELS,
     change_wuying_password,
     desktop_hourly_price,
     modify_desktop_spec,
@@ -226,8 +230,8 @@ def money_label(value):
 
 
 def cost_chart(points):
-    width, height = 640, 220
-    left, right, top, bottom = 58, 16, 16, 32
+    width, height = 1200, 300
+    left, right, top, bottom = 108, 16, 16, 48
     plot_w = width - left - right
     plot_h = height - top - bottom
     actual_peak = max((point["cumulative"] for point in points), default=0)
@@ -240,33 +244,62 @@ def cost_chart(points):
         coords.append({
             "x": round(x, 1),
             "y": round(y, 1),
+            "label_x": round(x, 1),
             "label": point["label"],
+            "anchor": "middle",
             "cumulative_label": point["cumulative_label"],
-            "show_label": index == 0 or index == steps or (len(points) > 8 and index % 5 == 0),
+            "show_label": index == 0 or index == steps or (len(points) > 6 and index % 5 == 0),
         })
     if len(coords) == 1:
         only = coords[0]
+        mid = round(left + plot_w / 2, 1)
         coords = [
-            dict(only, x=left, show_label=True),
+            dict(only, x=left, label_x=mid, anchor="middle", show_label=True),
             dict(only, x=round(left + plot_w, 1), show_label=False),
         ]
+    elif coords:
+        coords[0]["anchor"] = "start"
+        coords[-1]["anchor"] = "end"
     line = " ".join("{},{}".format(point["x"], point["y"]) for point in coords)
-    baseline = top + plot_h
+    baseline = round(top + plot_h, 1)
     area = "{left},{baseline} {line} {end},{baseline}".format(
         left=left,
         baseline=baseline,
         line=line,
         end=coords[-1]["x"] if coords else left,
     )
+    tick_count = 4 if actual_peak else 0
+    ticks = []
+    for step in range(tick_count + 1):
+        fraction = 0 if tick_count == 0 else step / tick_count
+        value = actual_peak * fraction
+        label = money_label(value)
+        box_width = max(52, len(label) * 6.6 + 14)
+        y = round(top + plot_h - plot_h * fraction, 1)
+        ticks.append({
+            "y": y,
+            "label": label,
+            "accent": step == tick_count and actual_peak > 0,
+            "box_width": round(box_width, 1),
+            "box_x": round(left - 10 - box_width, 1),
+            "label_x": left - 14,
+        })
     return {
         "width": width,
         "height": height,
         "left": left,
+        "right": width - right,
+        "top": top,
         "baseline": baseline,
-        "peak_label": money_label(actual_peak),
+        "y_title_x": 18,
+        "y_title_y": round(top + plot_h / 2, 1),
+        "x_title_x": round(left + plot_w / 2, 1),
+        "x_title_y": height - 8,
         "line": line,
         "area": area,
         "coords": coords,
+        "ticks": ticks,
+        "last": coords[-1] if coords else None,
     }
 
 
@@ -357,6 +390,14 @@ class DesktopListView(GroupRequiredMixin, DashboardMixin, ListView):
     def get_queryset(self):
         return VirtualMachine.objects.select_related("user__profile", "current_profile").order_by("-created")
 
+    def get(self, request, *args, **kwargs):
+        try:
+            for desktop in describe_desktops():
+                apply_desktop(desktop)
+        except AlibabaApiError:
+            pass
+        return super(DesktopListView, self).get(request, *args, **kwargs)
+
     def get_context_data(self, **kwargs):
         context = super(DesktopListView, self).get_context_data(**kwargs)
         context["page_title"] = "Desktops"
@@ -385,6 +426,16 @@ class DesktopDetailView(GroupRequiredMixin, DashboardMixin, DetailView):
 
     def get_queryset(self):
         return VirtualMachine.objects.select_related("user", "current_profile")
+
+    def get(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        if self.object.vm_id:
+            try:
+                refresh_desktop(self.object)
+            except AlibabaApiError as exc:
+                messages.warning(request, "Could not refresh the status from Alibaba: {}".format(exc))
+        context = self.get_context_data(object=self.object)
+        return self.render_to_response(context)
 
     def get_context_data(self, **kwargs):
         context = super(DesktopDetailView, self).get_context_data(**kwargs)
@@ -582,6 +633,11 @@ class DesktopSpecView(GroupRequiredMixin, DashboardFormMixin, FormView):
 
     def dispatch(self, request, *args, **kwargs):
         self.desktop = get_object_or_404(VirtualMachine, pk=kwargs['pk'])
+        if self.desktop.vm_id:
+            try:
+                refresh_desktop(self.desktop)
+            except AlibabaApiError:
+                pass
         return super(DesktopSpecView, self).dispatch(request, *args, **kwargs)
 
     def get_form_kwargs(self):
@@ -635,7 +691,7 @@ class DesktopSpecView(GroupRequiredMixin, DashboardFormMixin, FormView):
             system_disk=system_disk,
             data_disk=data_disk,
         ).first()
-        desktop.status = 'Updating'
+        desktop.status = 'Upgrading'
         desktop.modified_by = self.request.user
         desktop.save()
         log_desktop(
@@ -648,7 +704,7 @@ class DesktopSpecView(GroupRequiredMixin, DashboardFormMixin, FormView):
         )
         messages.success(
             self.request,
-            'Alibaba is changing this computer. Files and Windows stay. Start it again when the status leaves Updating.',
+            'Alibaba is upgrading this computer. Files and Windows stay. The status shows Upgrading until it finishes, then you can start it.',
         )
         return HttpResponseRedirect(reverse('view_dashboards:desktop_detail', args=[desktop.pk]))
 
@@ -974,6 +1030,61 @@ class UserProfileDeleteView(GroupRequiredMixin, DashboardMixin, DeleteView):
 
         return super(UserProfileDeleteView, self).form_valid(form)
 
+class SignInHistoryView(GroupRequiredMixin, DashboardMixin, TemplateView):
+    group_required = ['superadmin']
+    template_name = "view_dashboards/_group_dashboard/superadmin/signin_history.html"
+
+    def get_context_data(self, **kwargs):
+        context = super(SignInHistoryView, self).get_context_data(**kwargs)
+        context["page_title"] = "Sign-in"
+        context["main_nav"] = "signin"
+        days = self.request.GET.get("days", "7")
+        if days not in ("7", "30"):
+            days = "7"
+        selected_user = (self.request.GET.get("user") or "").strip()
+        profiles = list(
+            Profile.objects.exclude(eds_end_user_id__isnull=True)
+            .exclude(eds_end_user_id="")
+            .select_related("user")
+            .order_by("eds_end_user_id")
+        )
+        known_ids = {profile.eds_end_user_id for profile in profiles}
+        if selected_user and selected_user not in known_ids:
+            selected_user = ""
+        context["days"] = days
+        context["selected_user"] = selected_user
+        context["wuying_users"] = profiles
+        context["signin_error"] = ""
+        context["signin_events"] = []
+
+        end = timezone.now()
+        start = end - timedelta(days=int(days))
+        try:
+            raw_events = describe_signin_events(start, end, selected_user)
+        except AlibabaApiError as exc:
+            context["signin_error"] = str(exc)
+            return context
+
+        names = {profile.eds_end_user_id: profile.user.username for profile in profiles}
+        rows = []
+        for event in raw_events:
+            event_type = event.get("EventType") or ""
+            if event_type not in SIGNIN_EVENT_LABELS:
+                continue
+            rows.append({
+                "when": parse_alibaba_time(event.get("EventTime")),
+                "label": SIGNIN_EVENT_LABELS[event_type],
+                "end_user_id": event.get("EndUserId") or "",
+                "username": names.get(event.get("EndUserId") or "", ""),
+                "desktop_name": event.get("DesktopName") or "",
+                "desktop_id": event.get("DesktopId") or "",
+                "client_ip": event.get("ClientIp") or "",
+            })
+        rows.sort(key=lambda row: row["when"] or start, reverse=True)
+        context["signin_events"] = rows
+        return context
+
+
 class GuidanceView(GroupRequiredMixin, DashboardMixin, TemplateView):
     group_required = ['superadmin']
     template_name = "view_dashboards/_group_dashboard/superadmin/guidance.html"
@@ -1119,9 +1230,24 @@ class DesktopPowerView(GroupRequiredMixin, DashboardMixin, View):
             messages.error(request, "Unknown desktop action.")
             return HttpResponseRedirect(detail_url)
         try:
+            refresh_desktop(vm)
+        except AlibabaApiError:
+            pass
+        if action == "stop" and vm.status == "Stopped":
+            messages.info(request, "This computer is already stopped.")
+            return HttpResponseRedirect(detail_url)
+        if action == "start" and vm.status == "Running":
+            messages.info(request, "This computer is already running.")
+            return HttpResponseRedirect(detail_url)
+        try:
             operate_desktop(request, vm, *spec)
         except AlibabaApiError as exc:
-            messages.error(request, str(exc))
+            if action == "stop" and "not running" in str(exc).lower():
+                vm.status = "Stopped"
+                vm.save(update_fields=["status", "modified"])
+                messages.info(request, "Alibaba already has this computer stopped. The status is updated.")
+            else:
+                messages.error(request, str(exc))
         else:
             messages.success(request, "{} requested.".format(spec[0]))
         return HttpResponseRedirect(detail_url)
