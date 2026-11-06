@@ -53,8 +53,39 @@ STATUS_FROM_CLOUD = {
     "Updating": "Upgrading",
     "Upgrading": "Upgrading",
     "Expired": "Error",
-    "Deleted": "Error",
 }
+RELEASED_STATUSES = {"Deleting", "Deleted", "Releasing", "Released"}
+LIVE_CLOUD_STATUSES = {
+    "Running",
+    "Stopped",
+    "Starting",
+    "Stopping",
+    "Pending",
+    "Rebuilding",
+    "Updating",
+    "Upgrading",
+}
+
+
+def mark_desktop_released(vm_id):
+    if vm_id:
+        cache.set("ecd-released:{}".format(vm_id), True, 2 * 60 * 60)
+
+
+def desktop_was_released(vm_id):
+    if not vm_id:
+        return False
+    if cache.get("ecd-released:{}".format(vm_id)):
+        return True
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+    released = ActivityLog.objects.filter(
+        cloud_id=vm_id,
+        action="Delete",
+        created__gte=cutoff,
+    ).exists()
+    if released:
+        cache.set("ecd-released:{}".format(vm_id), True, 2 * 60 * 60)
+    return released
 
 
 class AlibabaApiError(Exception):
@@ -265,6 +296,150 @@ def desktop_policy_name():
     return policy_id
 
 
+def listed_network_packages(payload):
+    raw = payload.get("NetworkPackages") or payload.get("NetworkPackage") or []
+    if isinstance(raw, dict):
+        raw = raw.get("NetworkPackage") or raw.get("NetworkPackages") or []
+    if isinstance(raw, dict):
+        raw = [raw]
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def office_network_package():
+    payload = call_ecd("DescribeNetworkPackages", {"OfficeSiteId": DIRECTORY_ID, "MaxResults": 20})
+    for package in listed_network_packages(payload):
+        site = package.get("OfficeSiteId") or ""
+        if site and site != DIRECTORY_ID:
+            continue
+        if package.get("NetworkPackageId"):
+            return package
+    return None
+
+
+def bandwidth_label_from(mode, mbps, charge):
+    if mode != "premium":
+        return "No premium"
+    charge_name = "by bandwidth" if charge == "PayByBandwidth" else "by data transfer"
+    return "Premium {} Mbps, {}".format(mbps, charge_name)
+
+
+def bandwidth_state():
+    package = office_network_package()
+    if not package:
+        return {"mode": "basic", "mbps": 10, "charge": "PayByTraffic", "label": "No premium"}
+    charge = package.get("InternetChargeType") or "PayByTraffic"
+    if charge not in ("PayByTraffic", "PayByBandwidth"):
+        charge = "PayByTraffic"
+    mbps = int(package.get("Bandwidth") or 10)
+    return {
+        "mode": "premium",
+        "mbps": mbps,
+        "charge": charge,
+        "label": bandwidth_label_from("premium", mbps, charge),
+        "package_id": package.get("NetworkPackageId") or "",
+    }
+
+
+def create_premium_bandwidth(peak, charge):
+    payload = call_ecd("CreateNetworkPackage", {
+        "Bandwidth": peak,
+        "OfficeSiteId": DIRECTORY_ID,
+        "PayType": "PostPaid",
+        "InternetChargeType": charge,
+        "AutoPay": "true",
+    })
+    return payload.get("NetworkPackageId") or ""
+
+
+def network_package_by_id(package_id):
+    payload = call_ecd("DescribeNetworkPackages", {
+        "NetworkPackageId.1": package_id,
+        "MaxResults": 20,
+    })
+    for package in listed_network_packages(payload):
+        if package.get("NetworkPackageId") == package_id:
+            return package
+    return None
+
+
+def status_blocks_action(exc):
+    return "does not support" in str(exc).lower()
+
+
+def release_network_package(package_id):
+    """Unbind the plan, then delete it. Alibaba rejects both calls while the plan is still changing."""
+    last_error = None
+    unbound = False
+    for _ in range(6):
+        current = network_package_by_id(package_id)
+        if current is None or current.get("NetworkPackageStatus") == "Released":
+            return
+        status = current.get("NetworkPackageStatus") or ""
+        if status == "Releasing":
+            time.sleep(2)
+            continue
+        if status == "InUse" and not unbound:
+            try:
+                call_ecd("DissociateNetworkPackage", {"NetworkPackageId": package_id})
+                unbound = True
+            except AlibabaApiError as exc:
+                last_error = exc
+                if not status_blocks_action(exc):
+                    raise
+            time.sleep(2)
+            continue
+        try:
+            call_ecd("DeleteNetworkPackages", {"NetworkPackageId.1": package_id})
+        except AlibabaApiError as exc:
+            last_error = exc
+            if not status_blocks_action(exc):
+                raise
+            time.sleep(2)
+            continue
+        time.sleep(1)
+        if network_package_by_id(package_id) is None:
+            return
+    if last_error and not status_blocks_action(last_error):
+        raise last_error
+    raise AlibabaApiError(
+        "Alibaba is still updating this bandwidth plan, so it cannot be removed yet. Wait a minute and save again."
+    )
+
+
+def set_office_bandwidth(mode, mbps, charge):
+    if mode == "premium":
+        peak = int(mbps or 0)
+        if peak < 2 or peak > 200:
+            raise AlibabaApiError("Premium bandwidth must be 2 to 200 Mbps.")
+        if charge not in ("PayByTraffic", "PayByBandwidth"):
+            charge = "PayByTraffic"
+    else:
+        peak = 0
+        charge = "PayByTraffic"
+    current = office_network_package()
+    if mode != "premium":
+        if current and current.get("NetworkPackageId"):
+            release_network_package(current["NetworkPackageId"])
+        return "No premium"
+    if current is None:
+        create_premium_bandwidth(peak, charge)
+        return bandwidth_label_from("premium", peak, charge)
+    package_id = current.get("NetworkPackageId")
+    current_charge = current.get("InternetChargeType") or "PayByTraffic"
+    current_peak = int(current.get("Bandwidth") or 0)
+    if current_charge != charge:
+        release_network_package(package_id)
+        create_premium_bandwidth(peak, charge)
+        return bandwidth_label_from("premium", peak, charge)
+    if current_peak != peak:
+        call_ecd("ModifyNetworkPackageBandwidth", {
+            "NetworkPackageId": package_id,
+            "Bandwidth": peak,
+            "AutoPay": "true",
+        })
+    return bandwidth_label_from("premium", peak, charge)
+
+
 def create_cloud_desktop(name, profile=None, end_user_id=""):
     if not DIRECTORY_ID or DIRECTORY_ID == "xxxx":
         raise AlibabaApiError("Set DIRECTORY_ID in local settings to the Hangzhou office network.")
@@ -315,7 +490,7 @@ HOURS_IN_MONTH = 730
 def desktop_hourly_price(desktop_type, system_disk, data_disk):
     if not desktop_type:
         return None
-    cache_key = "ecd-price:{}:{}:{}".format(desktop_type, system_disk or 0, data_disk or 0)
+    cache_key = "ecd-price:v2:{}:{}:{}".format(desktop_type, system_disk or 0, data_disk or 0)
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
@@ -333,9 +508,39 @@ def desktop_hourly_price(desktop_type, system_disk, data_disk):
     trade = price.get("TradePrice")
     if trade in (None, ""):
         return None
+    modules = []
+    lines = price.get("OrderLines") or {}
+    if isinstance(lines, list):
+        line = lines[0] if lines else {}
+    elif isinstance(lines, dict) and lines:
+        line = next(iter(lines.values()))
+    else:
+        line = {}
+    if isinstance(line, list):
+        line = line[0] if line else {}
+    modules = line.get("moduleInstance") or []
+
+    def module_fee(code):
+        for module in modules:
+            if module.get("moduleCode") != code:
+                continue
+            fee = module.get("totalProductFee")
+            if fee in (None, ""):
+                return 0.0
+            return float(fee) / 100
+        return 0.0
+
+    disk_hourly = module_fee("SystemDiskSize") + module_fee("DataDiskSize")
+    compute_hourly = module_fee("DesktopType")
+    hourly = float(trade)
+    if compute_hourly <= 0 and disk_hourly <= 0:
+        compute_hourly = hourly
+        disk_hourly = 0.0
     quoted = {
-        "hourly": float(trade),
-        "monthly": float(trade) * HOURS_IN_MONTH,
+        "hourly": hourly,
+        "monthly": hourly * HOURS_IN_MONTH,
+        "disk_hourly": disk_hourly,
+        "compute_hourly": compute_hourly,
         "currency": price.get("Currency") or "USD",
     }
     cache.set(cache_key, quoted, 6 * 60 * 60)
@@ -447,7 +652,9 @@ def refresh_desktop(vm):
     payload = call_ecd("DescribeDesktops", {"DesktopId.1": vm.vm_id, "MaxResults": 1})
     desktops = payload.get("Desktops") or []
     if desktops:
-        apply_desktop(desktops[0])
+        saved = apply_desktop(desktops[0])
+        if saved is None:
+            return None
         vm.refresh_from_db()
     return vm
 
@@ -578,6 +785,12 @@ def apply_desktop(desktop):
     vm_id = desktop.get("DesktopId")
     if not vm_id:
         return None
+    cloud_status = (desktop.get("DesktopStatus") or "").strip()
+    if cloud_status in RELEASED_STATUSES or (
+        desktop_was_released(vm_id) and cloud_status not in LIVE_CLOUD_STATUSES
+    ):
+        VirtualMachine.objects.filter(vm_id=vm_id).delete()
+        return None
 
     vm, _created = VirtualMachine.objects.get_or_create(
         vm_id=vm_id,
@@ -586,7 +799,11 @@ def apply_desktop(desktop):
     vm.name = desktop.get("DesktopName") or vm.name
     vm.region = REGION_ID
     vm.directory_id = desktop.get("DirectoryId") or desktop.get("OfficeSiteId") or vm.directory_id
-    vm.status = STATUS_FROM_CLOUD.get(desktop.get("DesktopStatus"), "Error")
+    vm.status = STATUS_FROM_CLOUD.get(cloud_status, "Error")
+    if vm.status == "Error":
+        vm.status_detail = "Alibaba status: {}.".format(cloud_status or "not reported")
+    else:
+        vm.status_detail = ""
     vm.cpu = desktop.get("Cpu") if desktop.get("Cpu") is not None else vm.cpu
     ram = memory_gb(desktop.get("Memory"))
     if ram is not None:

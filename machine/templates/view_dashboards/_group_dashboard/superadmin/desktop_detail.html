@@ -139,6 +139,9 @@
                 <dt class="col-5">Status</dt>
                 <dd class="col-7" data-desktop-status="{{ desktop.pk }}">
                     <span data-desktop-badge="{{ desktop.pk }}">{{ desktop.get_status_display }}</span>
+                    {% if desktop.status_detail %}
+                    <div class="text-muted-green small mt-1">{{ desktop.status_detail }}</div>
+                    {% endif %}
                     <div class="text-muted-green small mt-1" data-desktop-note="{{ desktop.pk }}"{% if desktop.status != 'Upgrading' and desktop.status != 'Updating' %} style="display: none;"{% endif %}>Specification change in progress.</div>
                     <div class="progress mt-2" data-desktop-bar="{{ desktop.pk }}" style="height: 6px;{% if not desktop_busy %} display: none;{% endif %}">
                         <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%; background-color: #072F1F;"></div>
@@ -147,8 +150,8 @@
                 <dt class="col-5">Price</dt>
                 <dd class="col-7">
                     {% if desktop_price %}
-                        ${{ desktop_price.hourly|floatformat:4 }} per hour while it is running.
-                        About ${{ desktop_price.monthly|floatformat:2 }} if it stays on all month.
+                        USD {{ desktop_price.hourly|floatformat:4 }} per hour while it is running.
+                        About USD {{ desktop_price.monthly|floatformat:2 }} if it stays on all month.
                     {% else %}
                         -
                     {% endif %}
@@ -161,6 +164,11 @@
                 <dd class="col-7">{{ desktop.cpu|default:"-" }} cores / {{ desktop.ram|default:"-" }} GB</dd>
                 <dt class="col-5">Disks</dt>
                 <dd class="col-7">System {{ desktop.system_disk }} GB · Data {{ desktop.data_disk }} GB</dd>
+                <dt class="col-5">Internet</dt>
+                <dd class="col-7">
+                    {{ bandwidth_label|default:"-" }}
+                    <div class="text-muted-green small mt-1">Shared by every computer. <a href="{% url 'view_dashboards:office_network' %}">Change it on Network</a>.</div>
+                </dd>
                 <dt class="col-5">Region</dt>
                 <dd class="col-7">{{ desktop.region }}</dd>
                 <dt class="col-5">Directory</dt>

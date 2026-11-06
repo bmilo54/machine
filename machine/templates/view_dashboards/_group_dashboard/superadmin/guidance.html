@@ -17,8 +17,13 @@
         </li>
         <li class="mb-4">
             <strong>Choose the hardware, if you want a size other than the standard computer.</strong>
-            <p class="mb-1">A profile sets the desktop type and disks. Leave this out when you create the computer to buy 4 vCPU, 8 GB, an 80 GiB system disk, and no data disk. Data disk 0 means no extra disk.</p>
+            <p class="mb-1">A profile sets the desktop type and the disks. It does not set internet. Leave this out when you create the computer to buy 4 vCPU, 8 GB, an 80 GiB system disk, and no data disk. Data disk 0 means no extra disk.</p>
             <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:vm_profile_create' %}"><i class="bi bi-hdd" aria-hidden="true"></i> Add a VM profile</a>
+        </li>
+        <li class="mb-4">
+            <strong>Set the internet once for the whole office.</strong>
+            <p class="mb-1">Network is one premium plan shared by every computer in Singapore. A computer cannot have its own peak. No premium leaves every computer without internet. Pay by bandwidth charges the peak for every hour the plan exists, including while the computers are off. Choosing no premium on that page removes the plan.</p>
+            <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:office_network' %}"><i class="bi bi-wifi" aria-hidden="true"></i> Open Network</a>
         </li>
         <li class="mb-4">
             <strong>Buy the computer.</strong>
@@ -37,10 +42,11 @@
         </li>
         <li class="mb-4">
             <strong>Send the sign-in details.</strong>
-            <p class="mb-1">In the Wuying app, choose Enterprise &amp; Business, enter the office network ID, then the username and password from the Users page. The desktop list can copy that text.</p>
+            <p class="mb-1">In the Wuying app, choose Enterprise &amp; Business, enter the office network ID, then the username and password from the Users page. On the desktop list, the clipboard button copies this text for one user.</p>
             <p class="d-flex flex-wrap gap-2 mb-2">
                 <a class="btn-table-action guidance-step" href="{{ wuying_download_url }}" target="_blank" rel="noopener"><i class="bi bi-download" aria-hidden="true"></i> Download the Wuying app</a>
                 <a class="btn-table-action guidance-step" href="{{ wuying_web_url }}" target="_blank" rel="noopener"><i class="bi bi-globe" aria-hidden="true"></i> Open the browser client</a>
+                <button class="btn-table-action guidance-step" type="button" data-copy-signin>Copy sign-in info</button>
             </p>
             <p class="mb-0">Office network ID: {{ office_network_id|default:"Set DIRECTORY_ID in local settings" }}</p>
         </li>
@@ -52,3 +58,29 @@
     </ol>
 </div>
 {% endblock content %}
+
+{% block extra_js %}
+{{ wuying_download_url|json_script:"wuying-download-url" }}
+{{ wuying_web_url|json_script:"wuying-web-url" }}
+{{ office_network_id|json_script:"wuying-office-network-id" }}
+<script>
+document.querySelectorAll("[data-copy-signin]").forEach(function (button) {
+    button.addEventListener("click", function () {
+        var read = function (id) { return JSON.parse(document.getElementById(id).textContent); };
+        var lines = [
+            "Your cloud desktop is ready.",
+            "1. Download the Wuying app: " + read("wuying-download-url"),
+            "   Or open it in a browser: " + read("wuying-web-url"),
+            "2. Choose 企业版 & 商业版 (Enterprise).",
+            "3. Office network ID: " + read("wuying-office-network-id"),
+            "4. Sign in with the username and password your admin gave you.",
+        ];
+        var original = button.textContent;
+        navigator.clipboard.writeText(lines.join("\n")).then(function () {
+            button.textContent = "Copied";
+            setTimeout(function () { button.textContent = original; }, 1500);
+        });
+    });
+});
+</script>
+{% endblock extra_js %}

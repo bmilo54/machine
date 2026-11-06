@@ -26,7 +26,7 @@ from django.contrib.auth import login, logout, authenticate
 from django.contrib.auth.models import User
 
 from apps.profiles.models import Profile
-from apps.virtuals.choices import DESKTOP_TYPE_SPECS, spec_summary
+from apps.virtuals.choices import DESKTOP_TYPE_SPECS, desktop_type_label, spec_summary
 from apps.virtuals.models import ActivityLog, VMProfile, VirtualMachine
 from core.mixins import DashboardMixin, GroupRequiredMixin
 from view_api.views import (
@@ -45,19 +45,23 @@ from view_api.views import (
     describe_recordings,
     recording_signed_url,
     refresh_desktop,
+    mark_desktop_released,
     describe_signin_events,
     describe_wuying_users,
     parse_alibaba_time,
     SIGNIN_EVENT_LABELS,
     change_wuying_password,
     desktop_hourly_price,
+    bandwidth_state,
     desktop_policy_name,
     modify_desktop_spec,
+    set_office_bandwidth,
     remove_wuying_user,
     operate_desktop,
     write_log,
 )
 from .forms import (
+    OfficeNetworkForm,
     DashboardLoginForm,
     DesktopCreateForm,
     DesktopSpecForm,
@@ -230,10 +234,128 @@ def add_daily_cost(daily, start, end, hourly):
 
 def money_label(value):
     if not value:
-        return "$0.00"
+        return "USD 0.00"
     if abs(value) < 0.1:
-        return "${:.4f}".format(value)
-    return "${:.2f}".format(value)
+        return "USD {:.4f}".format(value)
+    return "USD {:.2f}".format(value)
+
+
+def same_settlement_hour(start, end):
+    # Alibaba settles pay-as-you-go on the hour, UTC+8.
+    start = localtime(start)
+    end = localtime(end)
+    return (
+        start.year == end.year
+        and start.month == end.month
+        and start.day == end.day
+        and start.hour == end.hour
+    )
+
+
+def hours_inside(start, end, window_start, window_end):
+    start = max(start, window_start)
+    end = min(end, window_end)
+    if end <= start:
+        return 0
+    return (end - start).total_seconds() / 3600
+
+
+def gaps_between(exist_start, exist_end, running):
+    cursor = exist_start
+    gaps = []
+    for start, end in running:
+        start = max(start, exist_start)
+        end = min(end, exist_end)
+        if end <= start:
+            continue
+        if start > cursor:
+            gaps.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < exist_end:
+        gaps.append((cursor, exist_end))
+    return gaps
+
+
+def spec_from_summary(text):
+    parts = [part.strip() for part in (text or "").split(" · ")]
+    if len(parts) != 3:
+        return None
+    label = parts[0]
+    system_text = parts[1].replace("system", "").replace("GiB", "").strip()
+    data_text = parts[2].replace("data", "").replace("GiB", "").strip()
+    type_id = ""
+    for candidate in DESKTOP_TYPE_SPECS:
+        if desktop_type_label(candidate) == label:
+            type_id = candidate
+            break
+    if not type_id:
+        return None
+    try:
+        return type_id, int(system_text), int(data_text)
+    except ValueError:
+        return None
+
+
+def desktop_life(logs, vm, now):
+    spec = None
+    exist_start = None
+    exist_end = None
+    opened = None
+    running = []
+    name = ""
+    for log in logs:
+        if log.desktop_name:
+            name = log.desktop_name
+        if log.action in ("Create", "Resize"):
+            parsed = spec_from_summary(log.new_value)
+            if parsed:
+                spec = parsed
+        if log.action == "Create" and exist_start is None:
+            exist_start = log.created
+        elif log.action in ("Start", "Restart") and opened is None:
+            opened = log.created
+        elif log.action == "Stop" and opened is not None:
+            running.append((opened, log.created))
+            opened = None
+        elif log.action == "Delete" and exist_end is None:
+            if opened is not None:
+                running.append((opened, log.created))
+                opened = None
+            exist_end = log.created
+    if vm is not None and vm.desktop_type:
+        spec = (vm.desktop_type, vm.system_disk or 0, vm.data_disk or 0)
+        name = vm.name or name
+    if vm is not None and exist_end is None:
+        if exist_start is None:
+            exist_start = vm.created
+        exist_end = now
+        if opened is not None:
+            running.append((opened, now))
+        elif not running and vm.status in ("Running", "Starting"):
+            running.append((exist_start, now))
+    return {
+        "name": name or "Untitled",
+        "spec": spec,
+        "exist_start": exist_start,
+        "exist_end": exist_end,
+        "running": running,
+        "vm": vm,
+    }
+
+
+def usage_windows(life, last_left, now):
+    if life["running"]:
+        return life["running"]
+    start = life["exist_start"]
+    if not start:
+        return []
+    end = life["exist_end"] or now
+    vm = life["vm"]
+    if vm is not None and vm.status in ("Running", "Starting"):
+        return [(start, now)]
+    if last_left and start < last_left <= end:
+        return [(start, last_left)]
+    return []
 
 
 def cost_chart(points):
@@ -314,39 +436,81 @@ def desktop_cost_report():
     now = timezone.now()
     month_start = localtime(now).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     ensure_desktop_types()
-    vms = list(VirtualMachine.objects.select_related("current_profile").order_by("name"))
-    events = {}
-    if vms:
-        for row in ActivityLog.objects.filter(
-            virtual_machine_id__in=[vm.id for vm in vms],
-            action__in=["Create", "Start", "Stop", "Restart", "Delete"],
-        ).order_by("created").values("virtual_machine_id", "action", "created"):
-            events.setdefault(row["virtual_machine_id"], []).append(row)
+    current = {
+        vm.vm_id: vm
+        for vm in VirtualMachine.objects.select_related("current_profile").exclude(vm_id="").exclude(vm_id__isnull=True)
+    }
+    grouped = {}
+    for log in ActivityLog.objects.filter(
+        action__in=["Create", "Start", "Stop", "Restart", "Delete", "Resize"],
+    ).exclude(cloud_id="").order_by("created"):
+        grouped.setdefault(log.cloud_id, []).append(log)
+    for vm_id in current:
+        grouped.setdefault(vm_id, [])
+
+    left_at = {}
+    try:
+        for event in describe_signin_events(month_start, now):
+            if event.get("EventType") != "DESKTOP_DISCONNECT":
+                continue
+            desktop_id = event.get("DesktopId") or ""
+            when = parse_alibaba_time(event.get("EventTime"))
+            if not desktop_id or not when:
+                continue
+            previous = left_at.get(desktop_id)
+            if previous is None or when > previous:
+                left_at[desktop_id] = when
+    except AlibabaApiError:
+        left_at = {}
 
     daily = {}
     rows = []
     unpriced = 0
-    for vm in vms:
-        quote = quote_desktop(vm)
+    remaining = 0
+    for cloud_id, logs in grouped.items():
+        life = desktop_life(logs, current.get(cloud_id), now)
+        life["running"] = usage_windows(life, left_at.get(cloud_id), now)
+        if not life["exist_start"] or not life["exist_end"]:
+            continue
+        # A computer released inside the hour it was created does not
+        # appear in the posted month total.
+        if life["vm"] is None and same_settlement_hour(life["exist_start"], life["exist_end"]):
+            continue
+        spec = life["spec"]
+        quote = None
+        if spec:
+            try:
+                quote = desktop_hourly_price(spec[0], spec[1], spec[2])
+            except AlibabaApiError:
+                quote = None
         if not quote:
             unpriced += 1
             continue
-        hours = 0
-        for start, end in running_intervals(vm, events.get(vm.id, []), now):
-            start = max(start, month_start)
-            end = min(end, now)
-            if end <= start:
-                continue
-            hours += (end - start).total_seconds() / 3600
-            add_daily_cost(daily, start, end, quote["hourly"])
+        hourly = quote["hourly"]
+        disk_hourly = quote.get("disk_hourly") or 0
+        on_hours = 0
+        for start, end in life["running"]:
+            start = max(start, life["exist_start"])
+            end = min(end, life["exist_end"])
+            on_hours += hours_inside(start, end, month_start, now)
+            add_daily_cost(daily, max(start, month_start), min(end, now), hourly)
+        off_hours = 0
+        for start, end in gaps_between(life["exist_start"], life["exist_end"], life["running"]):
+            off_hours += hours_inside(start, end, month_start, now)
+            add_daily_cost(daily, max(start, month_start), min(end, now), disk_hourly)
+        used = on_hours * hourly + off_hours * disk_hourly
+        vm = life["vm"]
         rows.append({
-            "name": vm.name or "Untitled",
-            "pk": vm.pk,
-            "hours": hours,
-            "cost": hours * quote["hourly"],
-            "hours_label": "{:.1f} h".format(hours),
-            "cost_label": money_label(hours * quote["hourly"]),
-            "hourly_label": money_label(quote["hourly"]),
+            "name": life["name"],
+            "pk": vm.pk if vm is not None else None,
+            "hours": on_hours,
+            "hours_label": "{:.1f} h".format(on_hours),
+            "disk_hours": off_hours,
+            "disk_hours_label": "{:.1f} h".format(off_hours),
+            "hourly_label": money_label(hourly),
+            "cost": used,
+            "cost_label": money_label(used),
+            "used_label": money_label(used),
         })
 
     points = []
@@ -368,6 +532,10 @@ def desktop_cost_report():
         "month_label": month_start.strftime("%B %Y"),
         "total": total,
         "total_label": money_label(total),
+        "remaining": remaining,
+        "remaining_label": money_label(remaining),
+        "expected": total,
+        "expected_label": money_label(total),
         "points": points,
         "chart": cost_chart(points),
         "rows": rows,
@@ -438,9 +606,13 @@ class DesktopDetailView(GroupRequiredMixin, DashboardMixin, DetailView):
         self.object = self.get_object()
         if self.object.vm_id:
             try:
-                refresh_desktop(self.object)
+                refreshed = refresh_desktop(self.object)
             except AlibabaApiError as exc:
                 messages.warning(request, "Could not refresh the status from Alibaba: {}".format(exc))
+            else:
+                if refreshed is None:
+                    messages.info(request, "This computer was released on Alibaba, so it has been removed from the dashboard.")
+                    return HttpResponseRedirect(reverse("view_dashboards:desktop_list"))
         context = self.get_context_data(object=self.object)
         return self.render_to_response(context)
 
@@ -454,6 +626,10 @@ class DesktopDetailView(GroupRequiredMixin, DashboardMixin, DetailView):
         context["selected_page"] = "desktops"
         context["main_nav"] = "desktops"
         context["activity_logs"] = self.object.activity_logs.select_related("actor").order_by("-created")[:30]
+        try:
+            context["bandwidth_label"] = bandwidth_state()["label"]
+        except AlibabaApiError:
+            context["bandwidth_label"] = ""
         return context
 
 
@@ -637,6 +813,73 @@ class DesktopUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
         return reverse('view_dashboards:desktop_detail', args=[self.object.pk])
 
 
+class OfficeNetworkView(GroupRequiredMixin, DashboardFormMixin, FormView):
+    group_required = ['superadmin']
+    form_class = OfficeNetworkForm
+    cancel_url_name = 'view_dashboards:dashboard'
+
+    def dispatch(self, request, *args, **kwargs):
+        try:
+            self.bandwidth = bandwidth_state()
+            self.bandwidth_error = ""
+        except AlibabaApiError as exc:
+            self.bandwidth = {"mode": "basic", "mbps": 10, "charge": "PayByTraffic", "label": "No premium"}
+            self.bandwidth_error = str(exc)
+        return super(OfficeNetworkView, self).dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self):
+        kwargs = super(OfficeNetworkView, self).get_form_kwargs()
+        kwargs["bandwidth"] = self.bandwidth
+        return kwargs
+
+    def get_context_data(self, **kwargs):
+        context = super(OfficeNetworkView, self).get_context_data(**kwargs)
+        context["page_title"] = "Network"
+        context["main_nav"] = "network"
+        context["submit_label"] = "Save network"
+        context["page_subtitle"] = (
+            "Now {}. This is the internet for every computer in the Singapore office network. "
+            "A computer does not have its own peak. Choosing no premium removes the plan, and the computers lose internet."
+        ).format(self.bandwidth["label"])
+        return context
+
+    def get(self, request, *args, **kwargs):
+        if self.bandwidth_error:
+            messages.warning(request, "Could not read the current bandwidth from Alibaba: {}".format(self.bandwidth_error))
+        return super(OfficeNetworkView, self).get(request, *args, **kwargs)
+
+    def form_valid(self, form):
+        old_label = self.bandwidth["label"]
+        try:
+            new_label = set_office_bandwidth(
+                form.cleaned_data["bandwidth_mode"],
+                form.cleaned_data["bandwidth_mbps"],
+                form.cleaned_data["internet_charge_type"],
+            )
+        except AlibabaApiError as exc:
+            log_desktop(self.request, None, "API Error", details=str(exc), desktop_name="Office network")
+            form.add_error(None, str(exc))
+            return self.form_invalid(form)
+        log_desktop(
+            self.request,
+            None,
+            "Update",
+            old_value=old_label,
+            new_value=new_label,
+            details="Changed the office network bandwidth. Every computer uses it.",
+            desktop_name="Office network",
+        )
+        messages.success(self.request, "Network is now {}.".format(new_label))
+        return HttpResponseRedirect(reverse("view_dashboards:office_network"))
+
+
+class DesktopBandwidthRedirectView(RedirectView):
+    permanent = False
+
+    def get_redirect_url(self, *args, **kwargs):
+        return reverse("view_dashboards:office_network")
+
+
 class DesktopSpecView(GroupRequiredMixin, DashboardFormMixin, FormView):
     group_required = ['superadmin']
     form_class = DesktopSpecForm
@@ -741,7 +984,7 @@ class VMProfileCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
     group_required = ['superadmin']
     model = VMProfile
     form_class = VMProfileForm
-    page_subtitle = 'Hardware template used when a desktop is created or resized.'
+    page_subtitle = 'Hardware template used when a desktop is created. Internet is set on Network.'
     cancel_url_name = 'view_dashboards:vm_profile_list'
 
     def get_context_data(self, **kwargs):
@@ -758,7 +1001,7 @@ class VMProfileCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
         log_desktop(
             self.request, None, "Create",
             new_value=spec_summary(profile.instance_type_code, profile.system_disk, profile.data_disk),
-            details="Saved a hardware profile.",
+            details="Saved a profile.",
             desktop_name=profile.name or "VM profile",
         )
         messages.success(self.request, 'VM profile saved.')
@@ -772,7 +1015,7 @@ class VMProfileUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
     group_required = ['superadmin']
     model = VMProfile
     form_class = VMProfileForm
-    page_subtitle = 'Update this hardware template.'
+    page_subtitle = 'Update the hardware on this template. Internet is set on Network.'
     cancel_url_name = 'view_dashboards:vm_profile_list'
 
     def get_context_data(self, **kwargs):
@@ -789,7 +1032,7 @@ class VMProfileUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
         log_desktop(
             self.request, None, "Update",
             new_value=spec_summary(profile.instance_type_code, profile.system_disk, profile.data_disk),
-            details="Updated a hardware profile.",
+            details="Updated a profile.",
             desktop_name=profile.name or "VM profile",
         )
         messages.success(self.request, 'VM profile updated.')
@@ -1341,14 +1584,18 @@ class DesktopDeleteView(GroupRequiredMixin, DashboardMixin, DeleteView):
         if vm.vm_id:
             try:
                 delete_cloud_desktop(vm.vm_id)
+                mark_desktop_released(vm.vm_id)
             except AlibabaApiError as exc:
                 code = (exc.code or "").lower()
                 message = str(exc).lower()
                 missing = "notfound" in code or "not found" in message or "not exist" in message
                 if not missing:
+                    vm.status_detail = str(exc)[:255]
+                    vm.save(update_fields=["status_detail", "modified"])
                     log_desktop(self.request, vm, "API Error", details=str(exc))
                     messages.error(self.request, str(exc))
-                    return HttpResponseRedirect(reverse("view_dashboards:desktop_delete", args=[vm.pk]))
+                    return HttpResponseRedirect(reverse("view_dashboards:desktop_detail", args=[vm.pk]))
+                mark_desktop_released(vm.vm_id)
                 removed_from_cloud = False
         if removed_from_cloud:
             details = "Released the computer on Alibaba and removed it from the dashboard."

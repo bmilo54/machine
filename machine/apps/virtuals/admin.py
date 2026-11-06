@@ -4,6 +4,7 @@ from .models import VMProfile, VirtualMachine, ActivityLog
 @admin.register(VMProfile)
 class VMProfileAdmin(admin.ModelAdmin):
     list_display = ('name', 'cpu', 'ram', 'system_disk', 'data_disk', 'instance_type_code')
+    exclude = ('bandwidth_mode', 'bandwidth_mbps', 'internet_charge_type')
     search_fields = ('name', 'instance_type_code')
 
 @admin.register(VirtualMachine)

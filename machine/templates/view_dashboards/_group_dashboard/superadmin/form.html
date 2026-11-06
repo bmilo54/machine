@@ -64,6 +64,9 @@
     .field-tip li + li {
         margin-top: 0.35rem;
     }
+    .network-field-idle {
+        opacity: 0.55;
+    }
 </style>
 {% endblock extra_css %}
 
@@ -89,3 +92,71 @@
     </div>
 </form>
 {% endblock content %}
+
+{% block extra_js %}
+<script>
+(function () {
+    var mode = document.getElementById("id_bandwidth_mode");
+    var peak = document.getElementById("id_bandwidth_mbps");
+    var charge = document.getElementById("id_internet_charge_type");
+    if (!mode || !peak || !charge) {
+        return;
+    }
+    var savedPeak = peak.value;
+    var savedCharge = charge.value;
+    var defaultPeak = mode.getAttribute("data-default-peak") || "10";
+    var defaultCharge = mode.getAttribute("data-default-charge") || "PayByTraffic";
+
+    function column(field) {
+        return field.closest(".col-lg-6");
+    }
+
+    function applyMode() {
+        var basic = mode.value !== "premium";
+        if (basic) {
+            peak.value = defaultPeak;
+            charge.value = defaultCharge;
+        } else {
+            peak.value = savedPeak;
+            charge.value = savedCharge;
+        }
+        peak.disabled = basic;
+        charge.disabled = basic;
+        var peakColumn = column(peak);
+        var chargeColumn = column(charge);
+        if (peakColumn) {
+            peakColumn.classList.toggle("network-field-idle", basic);
+        }
+        if (chargeColumn) {
+            chargeColumn.classList.toggle("network-field-idle", basic);
+        }
+    }
+
+    peak.addEventListener("input", function () {
+        if (mode.value === "premium") {
+            savedPeak = peak.value;
+        }
+    });
+    charge.addEventListener("change", function () {
+        if (mode.value === "premium") {
+            savedCharge = charge.value;
+        }
+    });
+    mode.addEventListener("change", function () {
+        if (mode.value !== "premium") {
+            savedPeak = peak.value;
+            savedCharge = charge.value;
+        }
+        applyMode();
+    });
+    var form = mode.closest("form");
+    if (form) {
+        form.addEventListener("submit", function () {
+            peak.disabled = false;
+            charge.disabled = false;
+        });
+    }
+    applyMode();
+})();
+</script>
+{% endblock extra_js %}

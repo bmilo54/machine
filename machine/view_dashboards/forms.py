@@ -69,7 +69,7 @@ class DesktopCreateForm(forms.ModelForm):
         self.fields["user"].help_text = "Optional. The desktop is assigned to this user in the dashboard."
         self.fields["current_profile"].required = False
         self.fields["current_profile"].queryset = VMProfile.objects.order_by("name")
-        self.fields["current_profile"].help_text = "Leave empty for 4 vCPU, 8 GB, an 80 GB system disk, and no data disk."
+        self.fields["current_profile"].help_text = "Leave empty for 4 vCPU, 8 GB, an 80 GB system disk, and no data disk. Internet is set once on Network."
 
     def clean_name(self):
         name = self.cleaned_data["name"].strip()
@@ -78,6 +78,60 @@ class DesktopCreateForm(forms.ModelForm):
         if name.lower().startswith(("http://", "https://")) or not name[0].isalpha():
             raise forms.ValidationError("Start the name with a letter.")
         return name
+
+
+class OfficeNetworkForm(forms.Form):
+    bandwidth_mode = forms.ChoiceField(
+        label="Public bandwidth",
+        choices=(
+            ("basic", "No premium bandwidth"),
+            ("premium", "Premium bandwidth"),
+        ),
+        initial="basic",
+        help_text="One plan for the Singapore office network. Every computer uses it.",
+    )
+    bandwidth_mbps = forms.IntegerField(
+        label="Peak bandwidth (Mbps)",
+        min_value=2,
+        max_value=200,
+        initial=10,
+        widget=forms.NumberInput(attrs={"step": 1, "min": 2, "max": 200}),
+        help_text="Used only for premium bandwidth. No premium sets this back to 10 Mbps.",
+    )
+    internet_charge_type = forms.ChoiceField(
+        label="Bandwidth billing",
+        choices=(
+            ("PayByTraffic", "Pay by data transfer"),
+            ("PayByBandwidth", "Pay by bandwidth"),
+        ),
+        initial="PayByTraffic",
+        help_text="Used only for premium bandwidth. No premium sets this back to pay by data transfer. Changing the billing method replaces the current plan.",
+    )
+
+    def __init__(self, *args, bandwidth=None, **kwargs):
+        super(OfficeNetworkForm, self).__init__(*args, **kwargs)
+        self.fields["bandwidth_mode"].guide = BANDWIDTH_GUIDE
+        self.fields["bandwidth_mode"].widget.attrs.update({
+            "data-default-peak": "10",
+            "data-default-charge": "PayByTraffic",
+        })
+        if bandwidth and not self.is_bound:
+            self.fields["bandwidth_mode"].initial = bandwidth.get("mode") or "basic"
+            self.fields["bandwidth_mbps"].initial = bandwidth.get("mbps") or 10
+            self.fields["internet_charge_type"].initial = bandwidth.get("charge") or "PayByTraffic"
+
+    def clean(self):
+        cleaned = super(OfficeNetworkForm, self).clean()
+        if cleaned.get("bandwidth_mode") != "premium":
+            cleaned["bandwidth_mbps"] = 10
+            cleaned["internet_charge_type"] = "PayByTraffic"
+            self._errors.pop("bandwidth_mbps", None)
+            self._errors.pop("internet_charge_type", None)
+            return cleaned
+        peak = cleaned.get("bandwidth_mbps")
+        if peak is not None and (peak < 2 or peak > 200):
+            self.add_error("bandwidth_mbps", "Use 2 to 200 Mbps.")
+        return cleaned
 
 
 class DesktopSpecForm(forms.Form):
@@ -248,6 +302,22 @@ DATA_DISK_GUIDE = [
 ]
 
 
+BANDWIDTH_GUIDE = [
+    {
+        "title": "Singapore.",
+        "text": "A computer in this region reaches the internet through premium bandwidth. No premium leaves it without internet.",
+    },
+    {
+        "title": "Shared peak.",
+        "text": "This page is the only place that sets internet. Every computer in the Singapore office network shares this one peak.",
+    },
+    {
+        "title": "Billing.",
+        "text": "Pay by data transfer charges downloads into the computers. Pay by bandwidth charges the peak for every hour the plan exists, including while the computers are off. Choosing no premium on this page removes the plan.",
+    },
+]
+
+
 class VMProfileForm(forms.ModelForm):
     instance_type_code = forms.ChoiceField(
         label="Desktop type",
@@ -280,7 +350,12 @@ class VMProfileForm(forms.ModelForm):
 
     class Meta:
         model = VMProfile
-        fields = ('name', 'instance_type_code', 'system_disk', 'data_disk')
+        fields = (
+            'name',
+            'instance_type_code',
+            'system_disk',
+            'data_disk',
+        )
 
     def clean_system_disk(self):
         size = self.cleaned_data["system_disk"]

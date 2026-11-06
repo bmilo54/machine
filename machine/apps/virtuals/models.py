@@ -15,6 +15,9 @@ class VMProfile(TimeStampedModel):
     gpu = models.IntegerField(verbose_name="GPU Memory (GB)", blank=True, null=True)
     system_disk = models.IntegerField(verbose_name="System Disk (GB)", blank=True, null=True)
     data_disk = models.IntegerField(verbose_name="Data Disk (GB)", blank=True, null=True)
+    bandwidth_mode = models.CharField(max_length=16, default="basic")
+    bandwidth_mbps = models.PositiveIntegerField(default=10)
+    internet_charge_type = models.CharField(max_length=20, default="PayByTraffic")
 
     # 阿里云无影对应的实际规格代码，非常重要
     # 例如: eds.general.4c8g
@@ -36,6 +39,13 @@ class VMProfile(TimeStampedModel):
     def gpu_card_name(self):
         return gpu_card_name(self.instance_type_code)
 
+    @property
+    def bandwidth_label(self):
+        if self.bandwidth_mode != "premium":
+            return "No premium"
+        charge = "by bandwidth" if self.internet_charge_type == "PayByBandwidth" else "by data transfer"
+        return "Premium {} Mbps, {}".format(self.bandwidth_mbps or 0, charge)
+
 
 class VirtualMachine(TimeStampedModel):
     """
@@ -56,6 +66,7 @@ class VirtualMachine(TimeStampedModel):
     region = models.CharField(max_length=50, default="cn-hangzhou")
     desktop_type = models.CharField(max_length=128, blank=True, help_text="Alibaba desktop type, such as eds.enterprise_office.6c12g")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Creating")
+    status_detail = models.CharField(max_length=255, blank=True)
 
     current_profile = models.ForeignKey(VMProfile, on_delete=models.SET_NULL, null=True, blank=True)
     cpu = models.IntegerField(help_text="Actual CPU Cores", blank=True, null=True)

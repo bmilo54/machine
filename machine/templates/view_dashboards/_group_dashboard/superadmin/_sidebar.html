@@ -14,6 +14,12 @@
             </a>
         </li>
         <li class="sidebar-menu-item">
+            <a href="{% url 'view_dashboards:office_network' %}" class="sidebar-menu-link {% if main_nav == 'network' %}active{% endif %}" title="Network">
+                <i class="bi bi-wifi"></i>
+                <span>Network</span>
+            </a>
+        </li>
+        <li class="sidebar-menu-item">
             <a href="{% url 'view_dashboards:vm_profile_list' %}" class="sidebar-menu-link {% if main_nav == 'vm_profiles' %}active{% endif %}" title="VM Profiles">
                 <i class="bi bi-hdd"></i>
                 <span>VM Profiles</span>
