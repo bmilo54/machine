@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>云服务选择</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .container {
+            text-align: center;
+            background: white;
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            max-width: 500px;
+            width: 90%;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 40px;
+            font-size: 28px;
+        }
+        
+        .button-container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        .btn {
+            padding: 15px 30px;
+            font-size: 18px;
+            font-weight: bold;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+            color: white;
+            text-align: center;
+        }
+        
+        .btn-cloud-phone {
+            background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+        }
+        
+        .btn-cloud-computer {
+            background: linear-gradient(45deg, #4ecdc4, #44a08d);
+        }
+        
+        .btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+        
+        .btn:active {
+            transform: translateY(0);
+        }
+    </style>
+<script defer="defer" src="WuyingWebSDK.js"></script></head>
+<body>
+    <div class="container">
+        <h1>请选择云服务类型</h1>
+        <div class="button-container">
+            <a href="cloud-phone.html" class="btn btn-cloud-phone">云手机</a>
+            <a href="cloud-computer.html" class="btn btn-cloud-computer">云电脑</a>
+        </div>
+    </div>
+</body>
+</html>

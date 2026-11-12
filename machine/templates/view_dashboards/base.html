@@ -25,13 +25,17 @@
 </head>
 <body>
     <div class="sidebar-wrapper" id="sidebar">
-        <a href="{% url 'view_dashboards:dashboard' %}" class="sidebar-brand">
+        <a href="{% if is_worker %}{% url 'view_dashboards:my_computer' %}{% else %}{% url 'view_dashboards:dashboard' %}{% endif %}" class="sidebar-brand">
             <i class="bi bi-asterisk"></i>
             <span>Cloud desktops</span>
         </a>
 
         <div class="flex-grow-1 overflow-y-auto">
-            {% include 'view_dashboards/_group_dashboard/superadmin/_sidebar.html' %}
+            {% if is_worker %}
+                {% include 'view_dashboards/_group_dashboard/worker/_sidebar.html' %}
+            {% else %}
+                {% include 'view_dashboards/_group_dashboard/superadmin/_sidebar.html' %}
+            {% endif %}
         </div>
 
         <div class="sidebar-profile">

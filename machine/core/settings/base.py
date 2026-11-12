@@ -50,6 +50,10 @@ INSTALLED_APPS = [
     'view_api',
 ]
 
+# SAMEORIGIN lets the connect page show the Web SDK file in its own frame.
+# Other websites still cannot embed this dashboard.
+X_FRAME_OPTIONS = "SAMEORIGIN"
+
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',

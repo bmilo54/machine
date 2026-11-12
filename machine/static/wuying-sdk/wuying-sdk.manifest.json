@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "sdkVersion": "2.13.23-asp3.18.14",
+  "cdnBase": "https://g.alicdn.com/aliyun-ecs/WuyingWebSdk-multi/2.13.23-asp3.18.14/WuyingWebSDK/",
+  "resources": [
+    {
+      "path": "cloud-computer.html",
+      "size": 68570,
+      "sha256": "d790f971ec6a389a3d29698ea60675ce9af064da5134e70c0e62990d805aec96"
+    },
+    {
+      "path": "cloud-phone.css",
+      "size": 10639,
+      "sha256": "bf75cd5d5a3536ff829c8de87dcd2f298a2e7b8f72ca79c3ab6b3ed3ae7a6d41"
+    },
+    {
+      "path": "cloud-phone.html",
+      "size": 11266,
+      "sha256": "2339d4fc2de7604c4473e20f9c22db5fb887797e6eb8b9e79851268ff1ebf7f6"
+    },
+    {
+      "path": "cloud-phone.js",
+      "size": 29912,
+      "sha256": "59e3289805e61e9a24d70e01097fc0ee0006f2cc6f6d5b52149c482f37928b21"
+    },
+    {
+      "path": "sdk/ASP/container.html",
+      "size": 5991,
+      "sha256": "d3834e3db393434974bae384864dd1915c556c289739e9093ae305adb930902a"
+    },
+    {
+      "path": "WuyingWebDemo.html",
+      "size": 2258,
+      "sha256": "198241b3e82a6d16ff449bc0354a51c15f2086a9995189b2a10b8cebfd3148e7"
+    },
+    {
+      "path": "WuyingWebSDK.js",
+      "size": 263162,
+      "sha256": "124e07582742b544c1159646cc3777edd8e3372c687dfe6e1508eebdbdfc989f"
+    }
+  ]
+}

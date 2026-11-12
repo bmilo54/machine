@@ -1163,6 +1163,14 @@ body.sidebar-minimized .sidebar-profile {
     transition: width 0.6s ease !important;
 }
 
+.update-progress {
+    margin-bottom: 1rem;
+    padding: 1rem 1.1rem;
+    border: 1px solid #DCFCE7;
+    border-radius: 12px;
+    background: #F7FAF8;
+}
+
 .bg-forest-medium {
     background-color: var(--brand-forest-medium);
 }

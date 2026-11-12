@@ -1,0 +1,131 @@
+{% extends "view_dashboards/base.html" %}
+
+{% block extra_css %}
+<style>
+    .computer-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 1rem;
+    }
+    .computer-card {
+        padding: 1.25rem;
+        background: #fff;
+        border: 1px solid rgba(11, 19, 15, 0.08);
+        border-radius: 16px;
+        box-shadow: var(--shadow-sm);
+    }
+    .computer-card-head {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+    }
+    .computer-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        background: #DCFCE7;
+        color: var(--brand-forest-dark);
+        font-size: 1.3rem;
+    }
+    .computer-name {
+        margin: 0;
+        font-size: 1rem;
+        font-weight: 700;
+        color: var(--brand-forest-dark);
+    }
+    .computer-state {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--text-muted-green);
+    }
+    .computer-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #9CA3AF;
+    }
+    .computer-dot-ready {
+        background: #16A34A;
+    }
+    .computer-dot-busy {
+        background: #F59E0B;
+    }
+    .computer-specs {
+        margin-bottom: 1rem;
+        font-size: 0.8125rem;
+        color: var(--text-muted-green);
+    }
+    .computer-card form {
+        margin: 0;
+    }
+</style>
+{% endblock extra_css %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">My computer</h1>
+        <p class="page-subtitle">Turn on your computer, then open it here in your browser.</p>
+    </div>
+</div>
+
+{% if computers %}
+<div class="computer-grid"{% if any_busy %} data-auto-refresh="1"{% endif %}>
+    {% for row in computers %}
+    <section class="computer-card">
+        <div class="computer-card-head">
+            <span class="computer-icon"><i class="bi bi-display"></i></span>
+            <div>
+                <h2 class="computer-name">{{ row.vm.name|default:"My computer" }}</h2>
+                <span class="computer-state">
+                    <span class="computer-dot{% if row.vm.status == 'Running' %} computer-dot-ready{% elif row.busy %} computer-dot-busy{% endif %}"></span>
+                    {{ row.label }}
+                </span>
+            </div>
+        </div>
+        {% if row.vm.cpu or row.vm.ram %}
+        <div class="computer-specs">{{ row.vm.cpu }} vCPU · {{ row.vm.ram }} GiB memory</div>
+        {% endif %}
+        {% if row.vm.status == 'Running' %}
+            <a class="btn btn-dark w-100" href="{% url 'view_dashboards:my_computer_connect' row.vm.pk %}">
+                <i class="bi bi-box-arrow-up-right me-1"></i> Open computer
+            </a>
+        {% elif row.vm.status == 'Stopped' %}
+            <form method="post" action="{% url 'view_dashboards:my_computer_start' row.vm.pk %}">
+                {% csrf_token %}
+                <button class="btn btn-dark w-100" type="submit">
+                    <i class="bi bi-power me-1"></i> Turn on
+                </button>
+            </form>
+        {% elif row.busy %}
+            <button class="btn btn-outline-secondary w-100" type="button" disabled>
+                <span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span> Please wait
+            </button>
+        {% else %}
+            <p class="small text-muted mb-0">This computer is not available right now. Ask your administrator.</p>
+        {% endif %}
+    </section>
+    {% endfor %}
+</div>
+{% else %}
+<div class="card">
+    <p class="mb-0">No computer is assigned to you yet. Ask your administrator.</p>
+</div>
+{% endif %}
+{% endblock content %}
+
+{% block extra_js %}
+<script>
+(function () {
+    if (!document.querySelector("[data-auto-refresh]")) return;
+    setTimeout(function () { window.location.reload(); }, 8000);
+})();
+</script>
+{% endblock extra_js %}

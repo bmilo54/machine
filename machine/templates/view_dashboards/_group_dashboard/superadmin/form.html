@@ -67,6 +67,58 @@
     .network-field-idle {
         opacity: 0.55;
     }
+    .network-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    .network-info {
+        margin-bottom: 1rem;
+        padding: 1rem 1.1rem;
+        border: 1px solid #DCFCE7;
+        border-radius: 12px;
+        background: #ffffff;
+    }
+    .network-info-now {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem 1.5rem;
+        margin-bottom: 0.75rem;
+    }
+    .network-info ul {
+        margin: 0;
+        padding-left: 1.1rem;
+    }
+    .network-info li + li {
+        margin-top: 0.4rem;
+    }
+    .update-progress {
+        margin-bottom: 1rem;
+        padding: 1rem 1.1rem;
+        border: 1px solid #DCFCE7;
+        border-radius: 12px;
+        background: #F7FAF8;
+    }
+    .website-formset {
+        margin-bottom: 1.25rem;
+    }
+    .website-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+    }
+    .website-row-field {
+        flex: 1;
+        min-width: 0;
+    }
+    .website-row .btn {
+        flex: none;
+    }
+    .website-row-field:has(.invalid-feedback) .form-control {
+        border-color: #dc3545;
+    }
 </style>
 {% endblock extra_css %}
 
@@ -78,22 +130,149 @@
     </div>
 </div>
 
-<form method="post" class="card" novalidate>
+{% if network_choices|length > 1 %}
+<nav class="network-tabs" aria-label="Office networks">
+    {% for choice in network_choices %}
+        <a class="btn btn-sm {% if choice.active %}btn-dark{% else %}btn-outline-dark{% endif %}" href="{{ choice.url }}"{% if choice.active %} aria-current="page"{% endif %}>{{ choice.label }}</a>
+    {% endfor %}
+</nav>
+{% endif %}
+
+{% if network_info %}
+<section class="network-info" aria-label="How the network works">
+    <h2 class="card-title mb-2">How the network works</h2>
+    <div class="network-info-now small">
+        <span><strong>Office network:</strong> {{ network_info.name }}</span>
+        <span><strong>Plan now:</strong> {{ network_info.label }}</span>
+        <span><strong>Computers sharing it:</strong> {{ network_info.computers }}</span>
+    </div>
+    <ul class="small text-muted-green">
+        <li><strong>One plan per office network.</strong> This office network has a single bandwidth plan. You cannot give one computer a different plan or peak. Other office networks have their own plan.</li>
+        <li><strong>Shared, not per computer.</strong> The peak is the total for all computers together.{% if network_info.premium %} With {{ network_info.peak }} Mbps, one computer alone can use up to {{ network_info.peak }} Mbps. Two computers busy at the same time get about {{ network_info.half|floatformat:"-1" }} Mbps each.{% else %} With 50 Mbps, one computer alone can use up to 50 Mbps. Two computers busy at the same time get about 25 Mbps each.{% endif %}</li>
+        <li><strong>One public IP.</strong> Every computer in this office network reaches the internet through the same public address.</li>
+        <li><strong>Changes apply to everyone here.</strong> Saving this page changes the internet for every computer in this office network at once, including new ones.</li>
+        <li><strong>Billed once.</strong> Bandwidth is charged for the plan, not for each computer, and is not part of the desktop payment estimate.</li>
+    </ul>
+</section>
+{% endif %}
+
+{% if update_progress %}
+<div class="update-progress" data-update-poll="{{ update_progress.poll_url }}" data-poll-mode="{{ update_progress.poll_mode }}" data-poll-id="{{ update_progress.poll_id|default:'' }}">
+    <div class="d-flex justify-content-between align-items-center gap-3">
+        <strong>{{ update_progress.title }}</strong>
+        <span data-update-label>{{ update_progress.label }}</span>
+    </div>
+    <div class="progress mt-2" style="height: 8px;">
+        <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%; background-color: #072F1F;"></div>
+    </div>
+    <p class="form-text mb-0 mt-2">{{ update_progress.detail }}</p>
+</div>
+{% endif %}
+
+<form method="post" class="card" novalidate{% if form_locked %} data-locked="1"{% endif %}>
     {% csrf_token %}
     {% if form.non_field_errors %}
         <div class="alert alert-danger">{{ form.non_field_errors }}</div>
     {% endif %}
-    <div class="row">
-        {% include "forms/_forms_fields.html" %}
-    </div>
+    <fieldset class="border-0 p-0 m-0"{% if form_locked %} disabled{% endif %}>
+        <div class="row">
+            {% include "forms/_forms_fields.html" %}
+        </div>
+        {% if website_formset %}
+        <div class="website-formset" data-website-formset{% if form.website_mode.value == "off" %} hidden{% endif %}>
+            <div class="d-flex align-items-center gap-1 mb-2">
+                <label class="label fs-16 mb-0">Websites</label>
+            </div>
+            {{ website_formset.management_form }}
+            {% if website_formset.non_form_errors %}
+                <div class="alert alert-danger">{{ website_formset.non_form_errors }}</div>
+            {% endif %}
+            <div data-website-rows>
+                {% for item in website_formset %}
+                <div class="website-row" data-website-row{% if item.DELETE.value %} hidden{% endif %}>
+                    <div class="website-row-field">
+                        {{ item.domain }}
+                        {% if item.domain.errors %}
+                            <div class="invalid-feedback d-block">{{ item.domain.errors.0 }}</div>
+                        {% endif %}
+                    </div>
+                    <div class="d-none">{{ item.DELETE }}</div>
+                    <button class="btn btn-outline-secondary" type="button" data-remove-website>Remove</button>
+                </div>
+                {% endfor %}
+            </div>
+            <template data-website-empty>
+                <div class="website-row" data-website-row>
+                    <div class="website-row-field">{{ website_formset.empty_form.domain }}</div>
+                    <div class="d-none">{{ website_formset.empty_form.DELETE }}</div>
+                    <button class="btn btn-outline-secondary" type="button" data-remove-website>Remove</button>
+                </div>
+            </template>
+            <button class="btn btn-outline-dark" type="button" data-add-website>Add website</button>
+            <div class="form-text text-body small">One domain per row, such as youtube.com or *.youtube.com.</div>
+        </div>
+        {% endif %}
+    </fieldset>
     <div class="d-flex gap-2 mt-2">
-        <button class="btn btn-dark" type="submit">{{ submit_label|default:"Save" }}</button>
+        <button class="btn btn-dark" type="submit"{% if form_locked %} disabled{% endif %}>{{ submit_label|default:"Save" }}</button>
         <a class="btn btn-outline-secondary" href="{{ cancel_url }}">Cancel</a>
     </div>
 </form>
 {% endblock content %}
 
 {% block extra_js %}
+{% if network_types %}
+{{ network_types|json_script:"network-types" }}
+<script>
+(function () {
+    var network = document.getElementById("id_office_network");
+    var type = document.getElementById("id_instance_type_code");
+    if (!network || !type) return;
+    var sold = JSON.parse(document.getElementById("network-types").textContent);
+    function filter() {
+        var allowed = sold[network.value] || [];
+        var firstShown = null;
+        Array.prototype.forEach.call(type.querySelectorAll("option"), function (option) {
+            var show = !allowed.length || allowed.indexOf(option.value) !== -1;
+            option.hidden = !show;
+            option.disabled = !show;
+            if (show && !firstShown) firstShown = option;
+        });
+        Array.prototype.forEach.call(type.querySelectorAll("optgroup"), function (group) {
+            group.hidden = !group.querySelector("option:not([hidden])");
+        });
+        var current = type.options[type.selectedIndex];
+        if ((!current || current.disabled) && firstShown) type.value = firstShown.value;
+    }
+    network.addEventListener("change", filter);
+    filter();
+})();
+</script>
+{% endif %}
+{% if profile_networks %}
+{{ profile_networks|json_script:"profile-networks" }}
+<script>
+(function () {
+    var network = document.getElementById("id_office_network");
+    var profile = document.getElementById("id_current_profile");
+    if (!network || !profile) return;
+    var owners = JSON.parse(document.getElementById("profile-networks").textContent);
+    function filter() {
+        Array.prototype.forEach.call(profile.querySelectorAll("option"), function (option) {
+            if (!option.value) return;
+            var owner = owners[option.value] || "";
+            var show = !owner || owner === network.value;
+            option.hidden = !show;
+            option.disabled = !show;
+        });
+        var current = profile.options[profile.selectedIndex];
+        if (current && current.disabled) profile.value = "";
+    }
+    network.addEventListener("change", filter);
+    filter();
+})();
+</script>
+{% endif %}
 <script>
 (function () {
     var mode = document.getElementById("id_bandwidth_mode");
@@ -150,13 +329,88 @@
         applyMode();
     });
     var form = mode.closest("form");
-    if (form) {
+    if (form && !form.hasAttribute("data-locked")) {
         form.addEventListener("submit", function () {
             peak.disabled = false;
             charge.disabled = false;
         });
     }
-    applyMode();
+    if (!form || !form.hasAttribute("data-locked")) {
+        applyMode();
+    }
 })();
 </script>
+<script>
+(function () {
+    var box = document.querySelector("[data-update-poll]");
+    if (!box) return;
+    var url = box.getAttribute("data-update-poll");
+    var mode = box.getAttribute("data-poll-mode");
+    var id = box.getAttribute("data-poll-id");
+    var tries = 0;
+    function stillUpdating(payload) {
+        if (mode === "network") return !!payload.updating;
+        var busy = false;
+        (payload.desktops || []).forEach(function (row) {
+            if (String(row.id) !== String(id)) return;
+            var label = box.querySelector("[data-update-label]");
+            if (label) label.textContent = row.label;
+            busy = row.status === "Upgrading" || row.status === "Updating";
+        });
+        return busy;
+    }
+    function tick() {
+        fetch(url, {headers: {"Accept": "application/json"}})
+            .then(function (response) { return response.json(); })
+            .then(function (payload) {
+                if (mode === "network") {
+                    var label = box.querySelector("[data-update-label]");
+                    if (label && payload.label) label.textContent = payload.label;
+                }
+                if (!stillUpdating(payload)) {
+                    window.location.reload();
+                    return;
+                }
+                tries += 1;
+                if (tries < 150) setTimeout(tick, 4000);
+            })
+            .catch(function () {
+                tries += 1;
+                if (tries < 150) setTimeout(tick, 4000);
+            });
+    }
+    setTimeout(tick, 4000);
+})();
+</script>
+{% if website_formset %}
+<script>
+(function () {
+    var box = document.querySelector("[data-website-formset]");
+    var mode = document.getElementById("id_website_mode");
+    if (!box || !mode) return;
+    var rows = box.querySelector("[data-website-rows]");
+    var total = box.querySelector("[name='websites-TOTAL_FORMS']");
+    var blank = box.querySelector("[data-website-empty]");
+    function sync() {
+        box.hidden = mode.value === "off";
+    }
+    box.addEventListener("click", function (event) {
+        var remove = event.target.closest("[data-remove-website]");
+        if (remove) {
+            var row = remove.closest("[data-website-row]");
+            var flag = row.querySelector("[name$='-DELETE']");
+            if (flag) flag.checked = true;
+            row.hidden = true;
+            return;
+        }
+        if (!event.target.closest("[data-add-website]")) return;
+        var index = total.value;
+        rows.insertAdjacentHTML("beforeend", blank.innerHTML.replace(/__prefix__/g, index));
+        total.value = String(parseInt(index, 10) + 1);
+    });
+    mode.addEventListener("change", sync);
+    sync();
+})();
+</script>
+{% endif %}
 {% endblock extra_js %}

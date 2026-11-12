@@ -20,6 +20,7 @@ from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.debug import sensitive_post_parameters
 from django.http import Http404, HttpResponse, HttpResponseRedirect, JsonResponse, StreamingHttpResponse
 from django.contrib import messages
+from django.core.exceptions import PermissionDenied
 from django.db.models import Count, Q
 from django.conf import settings
 from django.contrib.auth import login, logout, authenticate
@@ -27,16 +28,16 @@ from django.contrib.auth.models import User
 
 from apps.profiles.models import Profile
 from apps.virtuals.choices import DESKTOP_TYPE_SPECS, desktop_type_label, spec_summary
-from apps.virtuals.models import ActivityLog, VMProfile, VirtualMachine
-from core.mixins import DashboardMixin, GroupRequiredMixin
+from apps.virtuals.models import ActivityLog, CloudRegion, OfficeNetwork, VMProfile, VirtualMachine
+from core.mixins import DashboardMixin, GroupRequiredMixin, WorkerRequiredMixin, is_worker
 from view_api.views import (
     AlibabaApiError,
-    REGION_ID,
     WUYING_DOWNLOAD_URL,
     WUYING_WEB_URL,
     apply_desktop,
     assign_desktop_user,
     connection_ticket,
+    desktop_auth_code,
     BUSY_STATUSES,
     create_cloud_desktop,
     create_wuying_user,
@@ -47,13 +48,21 @@ from view_api.views import (
     refresh_desktop,
     mark_desktop_released,
     describe_signin_events,
+    describe_policy,
+    describe_policy_groups,
+    set_website_access,
+    website_access,
     describe_wuying_users,
+    default_network,
+    enabled_networks,
+    in_region,
+    sync_region,
+    sync_region_list,
     parse_alibaba_time,
     SIGNIN_EVENT_LABELS,
     change_wuying_password,
     desktop_hourly_price,
     bandwidth_state,
-    desktop_policy_name,
     modify_desktop_spec,
     set_office_bandwidth,
     remove_wuying_user,
@@ -62,6 +71,10 @@ from view_api.views import (
 )
 from .forms import (
     OfficeNetworkForm,
+    RegionPolicyForm,
+    WebsiteRuleFormSet,
+    website_domains,
+    RegionSelectForm,
     DashboardLoginForm,
     DesktopCreateForm,
     DesktopSpecForm,
@@ -104,8 +117,9 @@ class LoginView(FormView):
         if user is not None:
             self.is_superadmin = user.groups.filter(name='superadmin').exists()
             self.is_staff = user.groups.filter(name='staff').exists()
+            self.is_worker = is_worker(user)
 
-            if self.is_superadmin or self.is_staff:
+            if self.is_superadmin or self.is_staff or self.is_worker:
                 pass
             else:
                 return self.form_invalid(form)
@@ -137,6 +151,8 @@ class LoginView(FormView):
         messages.success(self.request, "Welcome Back {}.".format(self.request.user))
         if self.is_superadmin:
             return self.success_url
+        if getattr(self, 'is_worker', False):
+            return reverse('view_dashboards:my_computer')
 
         return super(LoginView, self).get_success_url()
 
@@ -303,9 +319,12 @@ def desktop_life(logs, vm, now):
     opened = None
     running = []
     name = ""
+    region = ""
     for log in logs:
         if log.desktop_name:
             name = log.desktop_name
+        if log.region:
+            region = log.region
         if log.action in ("Create", "Resize"):
             parsed = spec_from_summary(log.new_value)
             if parsed:
@@ -314,14 +333,21 @@ def desktop_life(logs, vm, now):
             exist_start = log.created
         elif log.action in ("Start", "Restart") and opened is None:
             opened = log.created
-        elif log.action == "Stop" and opened is not None:
-            running.append((opened, log.created))
-            opened = None
+        elif log.action == "Stop":
+            if opened is not None:
+                running.append((opened, log.created))
+                opened = None
+            elif not running and exist_start and exist_start < log.created:
+                # A new computer is already running. Stop with no Start
+                # closes that first run at the click, not at the last visit.
+                running.append((exist_start, log.created))
         elif log.action == "Delete" and exist_end is None:
             if opened is not None:
                 running.append((opened, log.created))
                 opened = None
             exist_end = log.created
+    if vm is not None and vm.region:
+        region = vm.region
     if vm is not None and vm.desktop_type:
         spec = (vm.desktop_type, vm.system_disk or 0, vm.data_disk or 0)
         name = vm.name or name
@@ -331,10 +357,15 @@ def desktop_life(logs, vm, now):
         exist_end = now
         if opened is not None:
             running.append((opened, now))
-        elif not running and vm.status in ("Running", "Starting"):
-            running.append((exist_start, now))
+        elif vm.status in ("Running", "Starting"):
+            boot = exist_start
+            if vm.last_start_time and exist_start and vm.last_start_time >= exist_start:
+                boot = vm.last_start_time
+            if boot and (not running or boot >= running[-1][1]) and boot < now:
+                running.append((boot, now))
     return {
         "name": name or "Untitled",
+        "region": region,
         "spec": spec,
         "exist_start": exist_start,
         "exist_end": exist_end,
@@ -343,7 +374,40 @@ def desktop_life(logs, vm, now):
     }
 
 
-def usage_windows(life, last_left, now):
+# A visit more than this long after the previous one starts a new run.
+# Shorter gaps stay on the full hourly price, because the computer was
+# still running between those visits.
+RUNNING_GAP = timedelta(hours=3)
+
+
+def visit_windows(exist_start, exist_end, pairs):
+    windows = []
+    cluster_start = None
+    cluster_end = None
+    for connect, disconnect in sorted(pairs):
+        connect = max(connect, exist_start)
+        disconnect = min(disconnect, exist_end)
+        if disconnect <= connect:
+            continue
+        if cluster_end is None:
+            if exist_start <= connect and connect - exist_start <= RUNNING_GAP:
+                cluster_start = exist_start
+            else:
+                cluster_start = connect
+            cluster_end = disconnect
+            continue
+        if connect - cluster_end <= RUNNING_GAP:
+            cluster_end = max(cluster_end, disconnect)
+        else:
+            windows.append((cluster_start, cluster_end))
+            cluster_start = connect
+            cluster_end = disconnect
+    if cluster_end is not None:
+        windows.append((cluster_start, cluster_end))
+    return windows
+
+
+def usage_windows(life, pairs, now):
     if life["running"]:
         return life["running"]
     start = life["exist_start"]
@@ -352,10 +416,11 @@ def usage_windows(life, last_left, now):
     end = life["exist_end"] or now
     vm = life["vm"]
     if vm is not None and vm.status in ("Running", "Starting"):
-        return [(start, now)]
-    if last_left and start < last_left <= end:
-        return [(start, last_left)]
-    return []
+        boot = start
+        if vm.last_start_time and vm.last_start_time >= start:
+            boot = vm.last_start_time
+        return [(boot, now)]
+    return visit_windows(start, end, pairs or [])
 
 
 def cost_chart(points):
@@ -448,20 +513,26 @@ def desktop_cost_report():
     for vm_id in current:
         grouped.setdefault(vm_id, [])
 
-    left_at = {}
+    visits = {}
+    open_visit = {}
     try:
+        timed = []
         for event in describe_signin_events(month_start, now):
-            if event.get("EventType") != "DESKTOP_DISCONNECT":
-                continue
+            kind = event.get("EventType")
             desktop_id = event.get("DesktopId") or ""
             when = parse_alibaba_time(event.get("EventTime"))
-            if not desktop_id or not when:
+            if kind not in ("DESKTOP_CONNECT", "DESKTOP_DISCONNECT") or not desktop_id or not when:
                 continue
-            previous = left_at.get(desktop_id)
-            if previous is None or when > previous:
-                left_at[desktop_id] = when
+            timed.append((when, kind, desktop_id))
+        for when, kind, desktop_id in sorted(timed):
+            if kind == "DESKTOP_CONNECT":
+                open_visit[desktop_id] = when
+                continue
+            started = open_visit.pop(desktop_id, None)
+            if started and when > started:
+                visits.setdefault(desktop_id, []).append((started, when))
     except AlibabaApiError:
-        left_at = {}
+        visits = {}
 
     daily = {}
     rows = []
@@ -469,7 +540,7 @@ def desktop_cost_report():
     remaining = 0
     for cloud_id, logs in grouped.items():
         life = desktop_life(logs, current.get(cloud_id), now)
-        life["running"] = usage_windows(life, left_at.get(cloud_id), now)
+        life["running"] = usage_windows(life, visits.get(cloud_id), now)
         if not life["exist_start"] or not life["exist_end"]:
             continue
         # A computer released inside the hour it was created does not
@@ -480,7 +551,7 @@ def desktop_cost_report():
         quote = None
         if spec:
             try:
-                quote = desktop_hourly_price(spec[0], spec[1], spec[2])
+                quote = desktop_hourly_price(spec[0], spec[1], spec[2], life["region"] or None)
             except AlibabaApiError:
                 quote = None
         if not quote:
@@ -550,9 +621,29 @@ def quote_desktop(vm):
     if not desktop_type:
         return None
     try:
-        return desktop_hourly_price(desktop_type, vm.system_disk, vm.data_disk)
+        return desktop_hourly_price(desktop_type, vm.system_disk, vm.data_disk, vm.region or None)
     except AlibabaApiError:
         return None
+
+
+def region_names():
+    return dict(CloudRegion.objects.values_list("region_id", "name"))
+
+
+def network_banner(networks):
+    """The first office network whose bandwidth plan is still updating, for the progress bar."""
+    for network in networks:
+        try:
+            state = bandwidth_state(network)
+        except AlibabaApiError:
+            continue
+        if state.get("updating"):
+            return {
+                "network": network,
+                "status": state.get("status") or "Updating",
+                "label": state.get("label") or "",
+            }
+    return None
 
 
 class DesktopListView(GroupRequiredMixin, DashboardMixin, ListView):
@@ -580,16 +671,21 @@ class DesktopListView(GroupRequiredMixin, DashboardMixin, ListView):
         context["main_nav"] = "desktops"
         context["wuying_download_url"] = WUYING_DOWNLOAD_URL
         context["wuying_web_url"] = WUYING_WEB_URL
-        context["office_network_id"] = settings.DIRECTORY_ID if settings.DIRECTORY_ID != "xxxx" else ""
         context["busy_statuses"] = BUSY_STATUSES
         ensure_desktop_types()
+        names = region_names()
+        networks = {network.directory_id: network for network in OfficeNetwork.objects.select_related("region")}
         monthly_total = 0
         for desktop in context["desktops"]:
             desktop.refresh_from_db()
             desktop.price = quote_desktop(desktop)
+            desktop.region_label = names.get(desktop.region) or desktop.region
+            network = networks.get(desktop.directory_id)
+            desktop.network_label = network.display_name if network else ""
             if desktop.price:
                 monthly_total += desktop.price["monthly"]
         context["monthly_total"] = monthly_total
+        context["network_banner"] = network_banner(enabled_networks())
         return context
 
 
@@ -626,10 +722,18 @@ class DesktopDetailView(GroupRequiredMixin, DashboardMixin, DetailView):
         context["selected_page"] = "desktops"
         context["main_nav"] = "desktops"
         context["activity_logs"] = self.object.activity_logs.select_related("actor").order_by("-created")[:30]
-        try:
-            context["bandwidth_label"] = bandwidth_state()["label"]
-        except AlibabaApiError:
-            context["bandwidth_label"] = ""
+        office = OfficeNetwork.objects.select_related("region").filter(directory_id=self.object.directory_id).first()
+        context["office_network"] = office
+        context["region_label"] = region_names().get(self.object.region) or self.object.region
+        network = {}
+        if office is not None:
+            try:
+                network = bandwidth_state(office)
+            except AlibabaApiError:
+                network = {}
+        context["bandwidth_label"] = network.get("label") or ""
+        context["network_updating"] = bool(network.get("updating"))
+        context["network_status"] = network.get("status") or "Updating"
         return context
 
 
@@ -647,8 +751,8 @@ def apply_profile_defaults(vm):
         vm.data_disk = profile.data_disk
 
 
-def log_desktop(request, vm, action, old_value='', new_value='', details='', desktop_name='', cloud_id=''):
-    write_log(request, vm, action, details, old_value, new_value, desktop_name, cloud_id)
+def log_desktop(request, vm, action, old_value='', new_value='', details='', desktop_name='', cloud_id='', region=''):
+    write_log(request, vm, action, details, old_value, new_value, desktop_name, cloud_id, region)
 
 
 class DashboardFormMixin(DashboardMixin):
@@ -668,7 +772,7 @@ class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
     group_required = ['superadmin']
     model = VirtualMachine
     form_class = DesktopCreateForm
-    page_subtitle = 'Purchases a Windows 11 Pro computer in Singapore. Alibaba bills it pay-as-you-go.'
+    page_subtitle = 'Purchases a Windows 11 Pro computer in the office network you pick. Alibaba bills it pay-as-you-go.'
     cancel_url_name = 'view_dashboards:desktop_list'
 
     def get_context_data(self, **kwargs):
@@ -677,9 +781,13 @@ class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
         context['main_nav'] = 'desktops'
         context['submit_label'] = 'Create cloud computer'
         context['page_subtitle'] = (
-            'Purchases a Windows 11 Pro computer in Singapore and applies the policy {}. '
+            'Purchases a Windows 11 Pro computer in the office network you pick, with that region\'s recording policy. '
             'Alibaba bills it pay-as-you-go.'
-        ).format(desktop_policy_name())
+        )
+        context['profile_networks'] = {
+            str(pk): str(network_id or "")
+            for pk, network_id in VMProfile.objects.values_list("pk", "office_network_id")
+        }
         return context
 
     def form_valid(self, form):
@@ -690,7 +798,12 @@ class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
             if profile and profile.eds_end_user_id:
                 end_user_id = profile.eds_end_user_id
         try:
-            created = create_cloud_desktop(vm.name, vm.current_profile, end_user_id)
+            created = create_cloud_desktop(
+                vm.name,
+                vm.current_profile,
+                end_user_id,
+                form.cleaned_data.get("office_network"),
+            )
         except AlibabaApiError as exc:
             log_desktop(
                 self.request,
@@ -709,8 +822,8 @@ class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
         vm.system_disk = created["system_disk"]
         vm.data_disk = created["data_disk"]
         vm.status = "Creating"
-        vm.region = REGION_ID
-        vm.directory_id = settings.DIRECTORY_ID if settings.DIRECTORY_ID != "xxxx" else ""
+        vm.region = created["region"]
+        vm.directory_id = created["directory_id"]
         vm.created_by = self.request.user
         vm.save()
         self.object = vm
@@ -767,7 +880,7 @@ class DesktopUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
                     form.add_error('user', 'This user has no Wuying username. Add one on the Users page first.')
                     return self.form_invalid(form)
             try:
-                assign_desktop_user(vm.vm_id, end_user_id)
+                assign_desktop_user(vm.vm_id, end_user_id, vm.region or None)
             except AlibabaApiError as exc:
                 log_desktop(self.request, vm, "API Error", details=str(exc))
                 form.add_error(None, 'Alibaba could not change the user: {} The computer must be Running.'.format(exc))
@@ -819,8 +932,18 @@ class OfficeNetworkView(GroupRequiredMixin, DashboardFormMixin, FormView):
     cancel_url_name = 'view_dashboards:dashboard'
 
     def dispatch(self, request, *args, **kwargs):
+        if not request.user.is_authenticated or not request.user.groups.filter(name__in=self.group_required).exists():
+            raise PermissionDenied
+        self.networks = enabled_networks()
+        pk = kwargs.get("pk")
+        if pk is None:
+            if not self.networks:
+                messages.warning(request, "No office network is enabled yet. Turn on a region and sync it first.")
+                return HttpResponseRedirect(reverse("view_dashboards:region_list"))
+            return HttpResponseRedirect(reverse("view_dashboards:office_network_detail", args=[default_network().pk]))
+        self.network = get_object_or_404(OfficeNetwork.objects.select_related("region"), pk=pk, region__enabled=True)
         try:
-            self.bandwidth = bandwidth_state()
+            self.bandwidth = bandwidth_state(self.network)
             self.bandwidth_error = ""
         except AlibabaApiError as exc:
             self.bandwidth = {"mode": "basic", "mbps": 10, "charge": "PayByTraffic", "label": "No premium"}
@@ -838,9 +961,42 @@ class OfficeNetworkView(GroupRequiredMixin, DashboardFormMixin, FormView):
         context["main_nav"] = "network"
         context["submit_label"] = "Save network"
         context["page_subtitle"] = (
-            "Now {}. This is the internet for every computer in the Singapore office network. "
+            "Now {}. This is the internet for every computer in the office network {}. "
             "A computer does not have its own peak. Choosing no premium removes the plan, and the computers lose internet."
-        ).format(self.bandwidth["label"])
+        ).format(self.bandwidth["label"], self.network)
+        sharing = (
+            VirtualMachine.objects.exclude(vm_id="").exclude(vm_id__isnull=True)
+            .filter(directory_id=self.network.directory_id).count()
+        )
+        peak = self.bandwidth.get("mbps") or 10
+        context["network_choices"] = [
+            {
+                "label": str(network),
+                "url": reverse("view_dashboards:office_network_detail", args=[network.pk]),
+                "active": network.pk == self.network.pk,
+            }
+            for network in self.networks
+        ]
+        context["network_info"] = {
+            "name": str(self.network),
+            "label": self.bandwidth["label"],
+            "premium": self.bandwidth.get("mode") == "premium",
+            "computers": sharing,
+            "peak": peak,
+            "half": round(peak / 2, 1),
+        }
+        if self.bandwidth.get("updating"):
+            context["form_locked"] = True
+            context["page_subtitle"] = (
+                "The office network is updating. Save stays off until Alibaba finishes, so a second change does not fail."
+            )
+            context["update_progress"] = {
+                "title": "Updating network",
+                "label": self.bandwidth.get("status") or "Updating",
+                "detail": "Every computer in this office network uses this plan. Wait until the bar finishes before saving again.",
+                "poll_url": reverse("view_dashboards:office_network_progress", args=[self.network.pk]),
+                "poll_mode": "network",
+            }
         return context
 
     def get(self, request, *args, **kwargs):
@@ -852,12 +1008,17 @@ class OfficeNetworkView(GroupRequiredMixin, DashboardFormMixin, FormView):
         old_label = self.bandwidth["label"]
         try:
             new_label = set_office_bandwidth(
+                self.network,
                 form.cleaned_data["bandwidth_mode"],
                 form.cleaned_data["bandwidth_mbps"],
                 form.cleaned_data["internet_charge_type"],
             )
         except AlibabaApiError as exc:
-            log_desktop(self.request, None, "API Error", details=str(exc), desktop_name="Office network")
+            log_desktop(
+                self.request, None, "API Error", details=str(exc),
+                desktop_name="Office network {}".format(self.network),
+                region=self.network.region.region_id,
+            )
             form.add_error(None, str(exc))
             return self.form_invalid(form)
         log_desktop(
@@ -866,17 +1027,248 @@ class OfficeNetworkView(GroupRequiredMixin, DashboardFormMixin, FormView):
             "Update",
             old_value=old_label,
             new_value=new_label,
-            details="Changed the office network bandwidth. Every computer uses it.",
-            desktop_name="Office network",
+            details="Changed the office network bandwidth. Every computer in it uses it.",
+            desktop_name="Office network {}".format(self.network),
+            region=self.network.region.region_id,
         )
-        messages.success(self.request, "Network is now {}.".format(new_label))
-        return HttpResponseRedirect(reverse("view_dashboards:office_network"))
+        messages.success(self.request, "Network is now {}. The progress bar stays until Alibaba finishes the update.".format(new_label))
+        return HttpResponseRedirect(reverse("view_dashboards:office_network_detail", args=[self.network.pk]))
+
+
+class OfficeNetworkProgressView(GroupRequiredMixin, DashboardMixin, View):
+    group_required = ['superadmin']
+
+    def get(self, request, *args, **kwargs):
+        network = get_object_or_404(OfficeNetwork.objects.select_related("region"), pk=kwargs["pk"])
+        try:
+            state = bandwidth_state(network, clear_settled=True)
+        except AlibabaApiError as exc:
+            return JsonResponse({"detail": str(exc)}, status=502)
+        return JsonResponse({
+            "updating": bool(state.get("updating")),
+            "label": state.get("status") or "Updating",
+            "text": state.get("label") or "",
+        })
+
+
+class RegionListView(GroupRequiredMixin, DashboardFormMixin, FormView):
+    group_required = ['superadmin']
+    form_class = RegionSelectForm
+    template_name = 'view_dashboards/_group_dashboard/superadmin/region_list.html'
+    cancel_url_name = 'view_dashboards:dashboard'
+
+    def get(self, request, *args, **kwargs):
+        if CloudRegion.objects.count() < 2:
+            try:
+                sync_region_list()
+            except AlibabaApiError as exc:
+                messages.warning(request, "Could not load the region list from Alibaba: {}".format(exc))
+        return super(RegionListView, self).get(request, *args, **kwargs)
+
+    def get_context_data(self, **kwargs):
+        context = super(RegionListView, self).get_context_data(**kwargs)
+        context['page_title'] = 'Regions'
+        context['main_nav'] = 'regions'
+        rows = []
+        for region in CloudRegion.objects.filter(enabled=True).order_by('name', 'region_id'):
+            networks = list(region.office_networks.exclude(status='Missing').order_by('name', 'directory_id'))
+            rows.append({
+                'region': region,
+                'networks': networks,
+                'computers': VirtualMachine.objects.filter(region=region.region_id).exclude(vm_id='').count(),
+                'profiles': VMProfile.objects.filter(office_network__region=region).count(),
+            })
+        context['enabled_rows'] = rows
+        return context
+
+    def form_valid(self, form):
+        chosen = list(form.cleaned_data['regions'])
+        before = set(CloudRegion.objects.filter(enabled=True).values_list('region_id', flat=True))
+        CloudRegion.objects.exclude(pk__in=[region.pk for region in chosen]).update(enabled=False)
+        failed = []
+        for region in chosen:
+            if not region.enabled:
+                region.enabled = True
+                region.save(update_fields=['enabled', 'modified'])
+            try:
+                sync_region(region)
+            except AlibabaApiError as exc:
+                failed.append('{}: {}'.format(region, exc))
+        after = sorted(region.region_id for region in chosen)
+        if set(after) != before:
+            log_desktop(
+                self.request, None, 'Update',
+                old_value=', '.join(sorted(before)),
+                new_value=', '.join(after),
+                details='Changed the regions in use.',
+                desktop_name='Regions',
+            )
+        if failed:
+            messages.warning(self.request, 'Some regions could not be loaded from Alibaba. {}'.format(' '.join(failed)))
+        else:
+            messages.success(self.request, 'Regions saved. Office networks and desktop types are loaded from Alibaba.')
+        return HttpResponseRedirect(reverse('view_dashboards:region_list'))
+
+
+class RegionSyncView(GroupRequiredMixin, DashboardMixin, View):
+    group_required = ['superadmin']
+
+    def post(self, request, *args, **kwargs):
+        failed = []
+        try:
+            sync_region_list()
+        except AlibabaApiError as exc:
+            failed.append('Region list: {}'.format(exc))
+        for region in CloudRegion.objects.filter(enabled=True):
+            try:
+                sync_region(region)
+            except AlibabaApiError as exc:
+                failed.append('{}: {}'.format(region, exc))
+        if failed:
+            messages.warning(request, 'Some regions could not be loaded from Alibaba. {}'.format(' '.join(failed)))
+        else:
+            messages.success(request, 'Reloaded office networks and desktop types from Alibaba.')
+        return HttpResponseRedirect(reverse('view_dashboards:region_list'))
+
+
+class RegionPolicyView(GroupRequiredMixin, DashboardFormMixin, FormView):
+    group_required = ['superadmin']
+    form_class = RegionPolicyForm
+    cancel_url_name = 'view_dashboards:region_list'
+
+    def dispatch(self, request, *args, **kwargs):
+        self.region = get_object_or_404(CloudRegion, pk=kwargs['pk'], enabled=True)
+        return super(RegionPolicyView, self).dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self):
+        kwargs = super(RegionPolicyView, self).get_form_kwargs()
+        self.current_access = {"mode": "off", "domains": [], "editable": False, "name": ""}
+        try:
+            with in_region(self.region.region_id):
+                self.policies = describe_policy_groups()
+                if self.region.policy_group_id:
+                    self.current_access = website_access(describe_policy(self.region.policy_group_id))
+        except AlibabaApiError as exc:
+            self.policies = []
+            messages.warning(self.request, 'Could not load the policies for {}: {}'.format(self.region, exc))
+        if self.region.policy_group_id and self.region.policy_group_id not in dict(self.policies):
+            self.policies.append((self.region.policy_group_id, self.region.policy_group_name or self.region.policy_group_id))
+        kwargs['policies'] = self.policies
+        if not self.request.POST:
+            kwargs['initial'] = {
+                'policy_group_id': self.region.policy_group_id,
+                'website_mode': self.current_access['mode'],
+            }
+        return kwargs
+
+    def get_website_formset(self):
+        initial = [{"domain": domain} for domain in self.current_access["domains"]]
+        if self.request.method == "POST":
+            return WebsiteRuleFormSet(self.request.POST, prefix="websites")
+        return WebsiteRuleFormSet(initial=initial, prefix="websites")
+
+    def post(self, request, *args, **kwargs):
+        form = self.get_form()
+        formset = self.get_website_formset()
+        self.website_formset = formset
+        if form.is_valid() and formset.is_valid() and self._apply_website_domains(form, formset):
+            return self.form_valid(form)
+        return self.render_to_response(self.get_context_data(form=form, website_formset=formset))
+
+    def _apply_website_domains(self, form, formset):
+        mode = form.cleaned_data.get("website_mode") or "off"
+        domains = website_domains(formset)
+        if domains is None:
+            return False
+        if mode == "off":
+            form.cleaned_data["websites"] = []
+            return True
+        if not domains:
+            form.add_error("website_mode", "Add at least one domain, or choose no restriction.")
+            return False
+        form.cleaned_data["websites"] = domains
+        return True
+
+    def get_context_data(self, **kwargs):
+        context = super(RegionPolicyView, self).get_context_data(**kwargs)
+        if "website_formset" not in context:
+            context["website_formset"] = getattr(self, "website_formset", None) or self.get_website_formset()
+        context['page_title'] = 'Policy for {}'.format(self.region)
+        context['main_nav'] = 'regions'
+        context['submit_label'] = 'Save policy'
+        context['page_subtitle'] = (
+            'The recording policy applies to new computers in {}. '
+            'The website list applies to every Windows computer already using that policy.'
+        ).format(self.region)
+        return context
+
+    def form_valid(self, form):
+        policy_id = form.cleaned_data['policy_group_id']
+        mode = form.cleaned_data['website_mode']
+        domains = form.cleaned_data['websites']
+        websites_changed = (
+            mode != self.current_access['mode'] or domains != self.current_access['domains']
+        )
+        if websites_changed:
+            if not policy_id:
+                form.add_error(
+                    'website_mode',
+                    'Choose a custom policy before setting websites. Alibaba\'s default policy cannot be changed.',
+                )
+                return self.form_invalid(form)
+            try:
+                with in_region(self.region.region_id):
+                    set_website_access(policy_id, mode, domains)
+            except AlibabaApiError as exc:
+                log_desktop(
+                    self.request, None, 'API Error', details=str(exc),
+                    desktop_name='Region {}'.format(self.region), region=self.region.region_id,
+                )
+                form.add_error(None, str(exc))
+                return self.form_invalid(form)
+            log_desktop(
+                self.request, None, 'Update',
+                old_value=self.current_access['mode'],
+                new_value='{} {}'.format(mode, ', '.join(domains)),
+                details='Changed which websites computers can open.',
+                desktop_name='Region {}'.format(self.region),
+                region=self.region.region_id,
+            )
+        old_value = self.region.policy_group_name or self.region.policy_group_id or 'Alibaba default policy'
+        return self._save_policy_choice(form, policy_id, websites_changed, old_value)
+
+    def _save_policy_choice(self, form, policy_id, websites_changed, old_value):
+        stored_id = CloudRegion.objects.filter(pk=self.region.pk).values_list('policy_group_id', flat=True).first() or ''
+        self.region.policy_group_id = policy_id
+        self.region.policy_group_name = dict(self.policies).get(policy_id, '') if policy_id else ''
+        self.region.save(update_fields=['policy_group_id', 'policy_group_name', 'modified'])
+        if stored_id != (policy_id or ''):
+            log_desktop(
+                self.request, None, 'Update',
+                old_value=old_value,
+                new_value=self.region.policy_group_name or policy_id or 'Alibaba default policy',
+                details='Changed the recording policy for new computers.',
+                desktop_name='Region {}'.format(self.region),
+                region=self.region.region_id,
+            )
+        if websites_changed:
+            messages.success(
+                self.request,
+                'Website access saved. Every Windows computer on this policy uses it now.',
+            )
+        else:
+            messages.success(self.request, 'Policy saved for {}.'.format(self.region))
+        return HttpResponseRedirect(reverse('view_dashboards:region_list'))
 
 
 class DesktopBandwidthRedirectView(RedirectView):
     permanent = False
 
     def get_redirect_url(self, *args, **kwargs):
+        vm = VirtualMachine.objects.filter(pk=kwargs.get("pk")).first()
+        network = OfficeNetwork.objects.filter(directory_id=vm.directory_id).first() if vm else None
+        if network is not None:
+            return reverse("view_dashboards:office_network_detail", args=[network.pk])
         return reverse("view_dashboards:office_network")
 
 
@@ -909,11 +1301,26 @@ class DesktopSpecView(GroupRequiredMixin, DashboardFormMixin, FormView):
             'The computer must be Stopped. CPU, memory, and GPU change together, and only inside the same family. '
             'Disks can only grow. Windows and files stay on the computer. Wait 5 minutes between changes.'
         )
-        if self.desktop.status != 'Stopped':
-            rules = 'This computer is {}. Stop it before changing specifications. {}'.format(
+        updating = self.desktop.status in ('Upgrading', 'Updating')
+        if updating:
+            context['form_locked'] = True
+            context['page_subtitle'] = (
+                'This computer is updating. Save stays off until Alibaba finishes, so a second change does not fail.'
+            )
+            context['update_progress'] = {
+                'title': 'Updating specifications',
+                'label': self.desktop.get_status_display(),
+                'detail': 'Wait until the bar finishes before changing this computer again.',
+                'poll_url': reverse('view_dashboards:desktop_progress'),
+                'poll_mode': 'desktop',
+                'poll_id': self.desktop.pk,
+            }
+        elif self.desktop.status != 'Stopped':
+            context['page_subtitle'] = 'This computer is {}. Stop it before changing specifications. {}'.format(
                 self.desktop.get_status_display(), rules,
             )
-        context['page_subtitle'] = rules
+        else:
+            context['page_subtitle'] = rules
         return context
 
     def form_valid(self, form):
@@ -928,6 +1335,7 @@ class DesktopSpecView(GroupRequiredMixin, DashboardFormMixin, FormView):
                 type_id,
                 system_disk if system_disk != desktop.system_disk else None,
                 data_disk if data_disk != desktop.data_disk else None,
+                desktop.region or None,
             )
         except AlibabaApiError as exc:
             log_desktop(self.request, desktop, 'API Error', details=str(exc))
@@ -944,6 +1352,7 @@ class DesktopSpecView(GroupRequiredMixin, DashboardFormMixin, FormView):
             instance_type_code=type_id,
             system_disk=system_disk,
             data_disk=data_disk,
+            office_network__directory_id=desktop.directory_id,
         ).first()
         desktop.status = 'Upgrading'
         desktop.modified_by = self.request.user
@@ -971,7 +1380,7 @@ class VMProfileListView(GroupRequiredMixin, DashboardMixin, ListView):
     paginate_by = 20
 
     def get_queryset(self):
-        return VMProfile.objects.order_by('name')
+        return VMProfile.objects.select_related('office_network__region').order_by('name')
 
     def get_context_data(self, **kwargs):
         context = super(VMProfileListView, self).get_context_data(**kwargs)
@@ -980,17 +1389,28 @@ class VMProfileListView(GroupRequiredMixin, DashboardMixin, ListView):
         return context
 
 
+def network_type_map():
+    return {
+        str(network.pk): network.desktop_types or []
+        for network in OfficeNetwork.objects.filter(region__enabled=True)
+    }
+
+
 class VMProfileCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
     group_required = ['superadmin']
     model = VMProfile
     form_class = VMProfileForm
-    page_subtitle = 'Hardware template used when a desktop is created. Internet is set on Network.'
+    page_subtitle = (
+        'Hardware template for one office network. The desktop types listed are the ones Alibaba sells there. '
+        'Internet is set on Network.'
+    )
     cancel_url_name = 'view_dashboards:vm_profile_list'
 
     def get_context_data(self, **kwargs):
         context = super(VMProfileCreateView, self).get_context_data(**kwargs)
         context['page_title'] = 'Add VM profile'
         context['main_nav'] = 'vm_profiles'
+        context['network_types'] = network_type_map()
         return context
 
     def form_valid(self, form):
@@ -1015,13 +1435,17 @@ class VMProfileUpdateView(GroupRequiredMixin, DashboardFormMixin, UpdateView):
     group_required = ['superadmin']
     model = VMProfile
     form_class = VMProfileForm
-    page_subtitle = 'Update the hardware on this template. Internet is set on Network.'
+    page_subtitle = (
+        'Update this template. The desktop types listed are the ones Alibaba sells in the chosen office network. '
+        'Internet is set on Network.'
+    )
     cancel_url_name = 'view_dashboards:vm_profile_list'
 
     def get_context_data(self, **kwargs):
         context = super(VMProfileUpdateView, self).get_context_data(**kwargs)
         context['page_title'] = 'Edit VM profile'
         context['main_nav'] = 'vm_profiles'
+        context['network_types'] = network_type_map()
         return context
 
     def form_valid(self, form):
@@ -1484,10 +1908,8 @@ class GuidanceView(GroupRequiredMixin, DashboardMixin, TemplateView):
         context["main_nav"] = "guidance"
         context["wuying_download_url"] = WUYING_DOWNLOAD_URL
         context["wuying_web_url"] = WUYING_WEB_URL
-        context["recording_policy_name"] = desktop_policy_name()
-        directory_id = settings.DIRECTORY_ID
-        context["office_network_id"] = directory_id if directory_id and directory_id != "xxxx" else ""
-
+        context["office_networks"] = enabled_networks()
+        context["web_sdk_ready"] = web_sdk_installed()
         return context
 
 
@@ -1583,7 +2005,7 @@ class DesktopDeleteView(GroupRequiredMixin, DashboardMixin, DeleteView):
         removed_from_cloud = bool(vm.vm_id)
         if vm.vm_id:
             try:
-                delete_cloud_desktop(vm.vm_id)
+                delete_cloud_desktop(vm.vm_id, vm.region or None)
                 mark_desktop_released(vm.vm_id)
             except AlibabaApiError as exc:
                 code = (exc.code or "").lower()
@@ -1668,4 +2090,123 @@ class DesktopConnectView(GroupRequiredMixin, DashboardMixin, View):
         response = HttpResponse(content, content_type="application/octet-stream")
         response["Content-Disposition"] = 'attachment; filename="{}"'.format(filename)
         write_log(request, vm, "Connect", "Downloaded connection ticket")
+        return response
+
+
+WORKER_STATUS_LABELS = {
+    "Running": "Ready",
+    "Stopped": "Turned off",
+    "Starting": "Turning on",
+    "Stopping": "Turning off",
+    "Creating": "Being prepared",
+    "Upgrading": "Being updated",
+    "Updating": "Being updated",
+}
+WEB_SDK_SCRIPT = "wuying-sdk/WuyingWebSDK.js"
+WEB_SDK_CONTAINER = "wuying-sdk/sdk/ASP/container.html"
+
+
+def web_sdk_installed():
+    from django.contrib.staticfiles import finders
+    return bool(finders.find(WEB_SDK_SCRIPT)) and bool(finders.find(WEB_SDK_CONTAINER))
+
+
+def worker_desktops(user):
+    return VirtualMachine.objects.filter(user=user).exclude(vm_id="").order_by("name")
+
+
+class MyComputerView(WorkerRequiredMixin, TemplateView):
+    template_name = "view_dashboards/_group_dashboard/worker/my_computer.html"
+
+    def get_context_data(self, **kwargs):
+        context = super(MyComputerView, self).get_context_data(**kwargs)
+        rows = []
+        for vm in worker_desktops(self.request.user):
+            try:
+                vm = refresh_desktop(vm) or vm
+            except AlibabaApiError:
+                pass
+            rows.append({
+                "vm": vm,
+                "label": WORKER_STATUS_LABELS.get(vm.status, "Not available"),
+                "busy": vm.status in BUSY_STATUSES,
+            })
+        context['page_title'] = 'My computer'
+        context['main_nav'] = 'my_computer'
+        context['computers'] = rows
+        context['any_busy'] = any(row["busy"] for row in rows)
+        return context
+
+
+class MyComputerStartView(WorkerRequiredMixin, View):
+    def post(self, request, pk):
+        vm = get_object_or_404(worker_desktops(request.user), pk=pk)
+        back = reverse("view_dashboards:my_computer")
+        try:
+            refresh_desktop(vm)
+        except AlibabaApiError:
+            pass
+        if vm.status == "Running":
+            messages.info(request, "Your computer is already on.")
+            return HttpResponseRedirect(back)
+        if vm.status != "Stopped":
+            messages.info(request, "Your computer is busy. Wait a moment and try again.")
+            return HttpResponseRedirect(back)
+        try:
+            operate_desktop(request, vm, *POWER_ACTIONS["start"])
+        except AlibabaApiError:
+            messages.error(request, "Your computer could not be turned on. Ask your administrator.")
+        else:
+            messages.success(request, "Turning on your computer. This takes about a minute.")
+        return HttpResponseRedirect(back)
+
+
+class MyComputerConnectView(WorkerRequiredMixin, TemplateView):
+    template_name = "view_dashboards/_group_dashboard/worker/connect.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        if request.user.is_authenticated and not request.user.groups.exists():
+            self.vm = get_object_or_404(worker_desktops(request.user), pk=kwargs['pk'])
+        return super(MyComputerConnectView, self).dispatch(request, *args, **kwargs)
+
+    def get(self, request, *args, **kwargs):
+        try:
+            refresh_desktop(self.vm)
+        except AlibabaApiError:
+            pass
+        if self.vm.status != "Running":
+            messages.info(request, "Turn on your computer first.")
+            return HttpResponseRedirect(reverse("view_dashboards:my_computer"))
+        return super(MyComputerConnectView, self).get(request, *args, **kwargs)
+
+    def get_context_data(self, **kwargs):
+        context = super(MyComputerConnectView, self).get_context_data(**kwargs)
+        context['page_title'] = self.vm.name or 'My computer'
+        context['computer'] = self.vm
+        context['sdk_ready'] = web_sdk_installed()
+        context['sdk_script'] = WEB_SDK_SCRIPT
+        context['sdk_container'] = WEB_SDK_CONTAINER
+        context['session_config'] = {
+            'desktopId': self.vm.vm_id,
+            'regionId': self.vm.region,
+            'overseas': not (self.vm.region or '').startswith('cn-'),
+            'codeUrl': reverse('view_dashboards:my_computer_code', args=[self.vm.pk]),
+            'backUrl': reverse('view_dashboards:my_computer'),
+        }
+        return context
+
+
+class MyComputerCodeView(WorkerRequiredMixin, View):
+    def post(self, request, pk):
+        vm = get_object_or_404(worker_desktops(request.user), pk=pk)
+        if vm.status != "Running":
+            return JsonResponse({"detail": "Turn on your computer first."}, status=409)
+        try:
+            ticket = desktop_auth_code(vm)
+        except AlibabaApiError as exc:
+            write_log(request, vm, "API Error", str(exc))
+            return JsonResponse({"detail": "Your computer could not be opened. Ask your administrator."}, status=502)
+        write_log(request, vm, "Connect", "Opened in the browser")
+        response = JsonResponse({"ticket": ticket})
+        response["Cache-Control"] = "no-store"
         return response

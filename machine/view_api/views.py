@@ -4,6 +4,8 @@ import hmac
 import json
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from urllib.error import HTTPError, URLError
@@ -25,10 +27,11 @@ from apps.virtuals.choices import (
     SYSTEM_DISK_MIN,
     valid_disk_size,
 )
-from apps.virtuals.models import ActivityLog, VMProfile, VirtualMachine
+from apps.virtuals.models import ActivityLog, CloudRegion, OfficeNetwork, VMProfile, VirtualMachine
 
 ACCESS_KEY_ID = settings.ACCESS_KEY_ID
 ACCESS_KEY_SECRET = settings.ACCESS_KEY_SECRET
+# Used only until regions are synced, and for calls that are not tied to a desktop.
 REGION_ID = settings.REGION_ID
 DIRECTORY_ID = settings.DIRECTORY_ID
 
@@ -38,6 +41,7 @@ WUYING_DOWNLOAD_URL = "https://www.alibabacloud.com/en/product/cloud-desktop/dow
 WUYING_WEB_URL = "https://workspace.alibabacloud.com"
 # International-site accounts keep Wuying users in Singapore; China-site accounts use eds-user.cn-shanghai.aliyuncs.com.
 EDS_USER_HOST = getattr(settings, "EDS_USER_HOST", "eds-user.ap-southeast-1.aliyuncs.com")
+EDS_USER_REGION = EDS_USER_HOST.split(".")[1] if EDS_USER_HOST.count(".") >= 2 else REGION_ID
 WINDOWS_11_PRO_IMAGE_ID = "desktopimage-windows-11-64-asp"
 WINDOWS_11_PRO_GPU_IMAGE_ID = "desktopimage-windows-11-64-asp-gpu"
 WINDOWS_LANGUAGE = "en-US"
@@ -121,15 +125,32 @@ def percent_encode(value):
     return encoded.replace("+", "%20").replace("*", "%2A").replace("%7E", "~")
 
 
+_active_region = ContextVar("alibaba_region", default="")
+
+
+def current_region():
+    return _active_region.get() or REGION_ID
+
+
+@contextmanager
+def in_region(region_id):
+    token = _active_region.set(region_id or "")
+    try:
+        yield
+    finally:
+        _active_region.reset(token)
+
+
 def call_ecd(action, extra=None):
     return call_alibaba("ecd", ECD_VERSION, action, extra)
 
 
 def call_eds_user(action, extra=None):
-    return call_alibaba("eds-user", EDS_USER_VERSION, action, extra, host=EDS_USER_HOST)
+    return call_alibaba("eds-user", EDS_USER_VERSION, action, extra, host=EDS_USER_HOST, region=EDS_USER_REGION)
 
 
-def call_alibaba(service, version, action, extra=None, host=None):
+def call_alibaba(service, version, action, extra=None, host=None, region=None):
+    region = region or current_region()
     params = {
         "Action": action,
         "Format": "JSON",
@@ -139,7 +160,7 @@ def call_alibaba(service, version, action, extra=None, host=None):
         "Timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "SignatureVersion": "1.0",
         "SignatureNonce": uuid.uuid4().hex,
-        "RegionId": REGION_ID,
+        "RegionId": region,
     }
     if extra:
         params.update(extra)
@@ -157,7 +178,7 @@ def call_alibaba(service, version, action, extra=None, host=None):
     query = "&".join(
         f"{percent_encode(key)}={percent_encode(params[key])}" for key in sorted(params)
     )
-    host = host or f"{service}.{REGION_ID}.aliyuncs.com"
+    host = host or f"{service}.{region}.aliyuncs.com"
     request = Request(f"https://{host}/?{query}")
 
     try:
@@ -271,21 +292,247 @@ def desktop_id_from(payload):
     return str(desktop_id).strip().strip('[]"')
 
 
-def desktop_policy_id():
-    policy_id = (getattr(settings, "POLICY_GROUP_ID", "") or "").strip()
-    if not policy_id or policy_id == "xxxx":
-        return FALLBACK_POLICY_GROUP_ID
-    return policy_id
+def desktop_policy_id(region_id=None):
+    region_id = region_id or current_region()
+    region = CloudRegion.objects.filter(region_id=region_id).first()
+    if region and region.policy_group_id:
+        return region.policy_group_id
+    if region_id == REGION_ID:
+        policy_id = (getattr(settings, "POLICY_GROUP_ID", "") or "").strip()
+        if policy_id and policy_id != "xxxx":
+            return policy_id
+    return FALLBACK_POLICY_GROUP_ID
 
 
-def desktop_policy_name():
-    policy_id = desktop_policy_id()
-    cache_key = "ecd-policy-name:{}".format(policy_id)
+def enabled_networks():
+    return list(
+        OfficeNetwork.objects.filter(region__enabled=True)
+        .exclude(status="Missing")
+        .select_related("region")
+        .order_by("region__name", "name", "directory_id")
+    )
+
+
+def enabled_region_ids():
+    regions = list(CloudRegion.objects.filter(enabled=True).values_list("region_id", flat=True))
+    return regions or [REGION_ID]
+
+
+def default_network():
+    networks = enabled_networks()
+    for network in networks:
+        if network.directory_id == DIRECTORY_ID:
+            return network
+    if networks:
+        return networks[0]
+    if DIRECTORY_ID and DIRECTORY_ID != "xxxx":
+        return OfficeNetwork.objects.filter(directory_id=DIRECTORY_ID).select_related("region").first()
+    return None
+
+
+def listed(payload, key, inner):
+    raw = payload.get(key) or []
+    if isinstance(raw, dict):
+        raw = raw.get(inner) or []
+    if isinstance(raw, dict):
+        raw = [raw]
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def sync_region_list():
+    payload = call_ecd("DescribeRegions", {"AcceptLanguage": "en-US"})
+    seen = []
+    for item in listed(payload, "Regions", "Region"):
+        region_id = item.get("RegionId") or ""
+        if not region_id:
+            continue
+        region, _created = CloudRegion.objects.get_or_create(region_id=region_id)
+        name = item.get("LocalName") or region_id
+        if region.name != name:
+            region.name = name
+            region.save(update_fields=["name", "modified"])
+        seen.append(region_id)
+    return seen
+
+
+def describe_office_sites():
+    sites = []
+    next_token = ""
+    for _ in range(10):
+        extra = {"MaxResults": 100}
+        if next_token:
+            extra["NextToken"] = next_token
+        payload = call_ecd("DescribeOfficeSites", extra)
+        sites.extend(payload.get("OfficeSites") or [])
+        next_token = payload.get("NextToken") or ""
+        if not next_token:
+            break
+    return sites
+
+
+def sold_desktop_types(directory_id):
+    payload = call_ecd("DescribeDesktopTypes", {"OfficeSiteId": directory_id, "OrderType": "PostPaid"})
+    types = []
+    for item in payload.get("DesktopTypes") or []:
+        type_id = item.get("DesktopTypeId") or ""
+        if type_id in DESKTOP_TYPE_SPECS and type_id not in types:
+            types.append(type_id)
+    return types
+
+
+def describe_policy_groups():
+    groups = []
+    next_token = ""
+    for _ in range(10):
+        extra = {"MaxResults": 100}
+        if next_token:
+            extra["NextToken"] = next_token
+        payload = call_ecd("DescribePolicyGroups", extra)
+        for group in payload.get("DescribePolicyGroups") or []:
+            if group.get("PolicyGroupId"):
+                groups.append((group["PolicyGroupId"], group.get("Name") or group["PolicyGroupId"]))
+        next_token = payload.get("NextToken") or ""
+        if not next_token:
+            break
+    return groups
+
+
+def describe_policy(policy_id):
+    if not policy_id:
+        return None
+    next_token = ""
+    for _ in range(10):
+        extra = {"PolicyGroupId": policy_id, "MaxResults": 100}
+        if next_token:
+            extra["NextToken"] = next_token
+        payload = call_ecd("DescribePolicyGroups", extra)
+        for group in payload.get("DescribePolicyGroups") or []:
+            if group.get("PolicyGroupId") == policy_id:
+                return group
+        next_token = payload.get("NextToken") or ""
+        if not next_token:
+            break
+    return None
+
+
+def website_access(policy):
+    """How this policy treats websites. Off means every site can open."""
+    empty = {"mode": "off", "domains": [], "editable": False, "name": ""}
+    if not policy:
+        return empty
+    rules = policy.get("DomainResolveRule") or []
+    if isinstance(rules, dict):
+        rules = [rules]
+    allows = []
+    blocks = []
+    catch_all_block = False
+    for rule in rules:
+        domain = (rule.get("Domain") or "").strip().lower()
+        action = (rule.get("Policy") or "").lower()
+        if not domain:
+            continue
+        if domain == "*" and action == "block":
+            catch_all_block = True
+            continue
+        if action == "allow":
+            allows.append(domain)
+        elif action == "block":
+            blocks.append(domain)
+    enabled = (policy.get("DomainResolveRuleType") or "off").lower() == "on"
+    if enabled and allows and catch_all_block and not blocks:
+        mode, domains = "whitelist", allows
+    elif enabled and blocks and not allows:
+        mode, domains = "blacklist", blocks
+    else:
+        mode, domains = "off", []
+    return {
+        "mode": mode,
+        "domains": domains,
+        "editable": (policy.get("PolicyGroupType") or "") != "SYSTEM",
+        "name": policy.get("Name") or "",
+    }
+
+
+def set_website_access(policy_id, mode, domains):
+    """Blacklist blocks the listed domains. Whitelist allows only those domains."""
+    policy = describe_policy(policy_id)
+    if policy is None:
+        raise AlibabaApiError("Alibaba did not return this policy.")
+    if (policy.get("PolicyGroupType") or "") == "SYSTEM":
+        raise AlibabaApiError(
+            "Alibaba's built-in policy cannot take a website list. Choose a custom policy for this region first."
+        )
+    extra = {"PolicyGroupId": policy_id}
+    if policy.get("Recording"):
+        extra["Recording"] = policy["Recording"]
+    if mode == "off":
+        extra["DomainResolveRuleType"] = "off"
+    else:
+        action = "block" if mode == "blacklist" else "allow"
+        extra["DomainResolveRuleType"] = "on"
+        for index, domain in enumerate(domains, start=1):
+            prefix = "DomainResolveRule.{}.".format(index)
+            extra[prefix + "Domain"] = domain
+            extra[prefix + "Policy"] = action
+            extra[prefix + "Description"] = "Set from the dashboard"
+        if mode == "whitelist":
+            prefix = "DomainResolveRule.{}.".format(len(domains) + 1)
+            extra[prefix + "Domain"] = "*"
+            extra[prefix + "Policy"] = "block"
+            extra[prefix + "Description"] = "Block every other website"
+    # A region-independent policy lives in Alibaba's center. ModifyPolicyGroup
+    # cannot see it and returns PolicyGroupId not found. ModifyCenterPolicy
+    # accepts that policy only when RegionId is cn-shanghai.
+    if (policy.get("ResourceRegionId") or "") == "center":
+        extra["BusinessType"] = 8
+        extra["ResourceType"] = "desktop"
+        call_alibaba("ecd", ECD_VERSION, "ModifyCenterPolicy", extra, region="cn-shanghai")
+        return
+    call_ecd("ModifyPolicyGroup", extra)
+
+
+def sync_region(region):
+    """Load the office networks of one region and the desktop types each one sells."""
+    now = datetime.now(timezone.utc)
+    with in_region(region.region_id):
+        sites = describe_office_sites()
+        seen = []
+        for site in sites:
+            directory_id = site.get("OfficeSiteId") or ""
+            if not directory_id:
+                continue
+            network, _created = OfficeNetwork.objects.get_or_create(
+                directory_id=directory_id,
+                defaults={"region": region},
+            )
+            network.region = region
+            network.name = site.get("Name") or site.get("OfficeSiteName") or ""
+            network.status = site.get("Status") or ""
+            try:
+                network.desktop_types = sold_desktop_types(directory_id)
+                network.types_synced = now
+            except AlibabaApiError:
+                pass
+            network.save()
+            seen.append(directory_id)
+        OfficeNetwork.objects.filter(region=region).exclude(directory_id__in=seen).update(status="Missing")
+        if region.policy_group_id:
+            names = dict(describe_policy_groups())
+            region.policy_group_name = names.get(region.policy_group_id, "")
+            region.save(update_fields=["policy_group_name", "modified"])
+    return len(seen)
+
+
+def desktop_policy_name(region_id=None):
+    region_id = region_id or current_region()
+    policy_id = desktop_policy_id(region_id)
+    cache_key = "ecd-policy-name:{}:{}".format(region_id, policy_id)
     cached = cache.get(cache_key)
     if cached:
         return cached
     try:
-        payload = call_ecd("DescribePolicyGroups", {"PolicyGroupId": policy_id, "MaxResults": 20})
+        with in_region(region_id):
+            payload = call_ecd("DescribePolicyGroups", {"PolicyGroupId": policy_id, "MaxResults": 20})
     except AlibabaApiError:
         return policy_id
     for group in payload.get("DescribePolicyGroups") or []:
@@ -305,15 +552,31 @@ def listed_network_packages(payload):
     return [item for item in raw if isinstance(item, dict)]
 
 
-def office_network_package():
-    payload = call_ecd("DescribeNetworkPackages", {"OfficeSiteId": DIRECTORY_ID, "MaxResults": 20})
+def network_or_default(network):
+    network = network or default_network()
+    if network is None:
+        raise AlibabaApiError("No office network is enabled. Open Regions, turn on a region and sync it.")
+    return network
+
+
+def office_network_package(network=None):
+    network = network_or_default(network)
+    with in_region(network.region.region_id):
+        payload = call_ecd("DescribeNetworkPackages", {"OfficeSiteId": network.directory_id, "MaxResults": 20})
     for package in listed_network_packages(payload):
         site = package.get("OfficeSiteId") or ""
-        if site and site != DIRECTORY_ID:
+        if site and site != network.directory_id:
             continue
         if package.get("NetworkPackageId"):
             return package
     return None
+
+
+NETWORK_BUSY_STATUSES = {"Creating", "Releasing", "Updating", "Associating", "Dissociating", "Pending"}
+
+
+def network_busy_key(network):
+    return "ecd-network-busy:{}".format(network.directory_id)
 
 
 def bandwidth_label_from(mode, mbps, charge):
@@ -323,27 +586,56 @@ def bandwidth_label_from(mode, mbps, charge):
     return "Premium {} Mbps, {}".format(mbps, charge_name)
 
 
-def bandwidth_state():
-    package = office_network_package()
+def mark_network_busy(network):
+    cache.set(network_busy_key(network), True, 90)
+
+
+def clear_network_busy(network):
+    cache.delete(network_busy_key(network))
+
+
+def network_is_updating(network, status, clear_settled=False):
+    busy_status = (status or "") in NETWORK_BUSY_STATUSES
+    key = network_busy_key(network)
+    marked = bool(cache.get(key))
+    if clear_settled and marked and not busy_status:
+        cache.delete(key)
+        marked = False
+    return busy_status or marked
+
+
+def bandwidth_state(network=None, clear_settled=False):
+    network = network_or_default(network)
+    package = office_network_package(network)
     if not package:
-        return {"mode": "basic", "mbps": 10, "charge": "PayByTraffic", "label": "No premium"}
+        return {
+            "mode": "basic",
+            "mbps": 10,
+            "charge": "PayByTraffic",
+            "label": "No premium",
+            "status": "",
+            "updating": network_is_updating(network, "", clear_settled=clear_settled),
+        }
     charge = package.get("InternetChargeType") or "PayByTraffic"
     if charge not in ("PayByTraffic", "PayByBandwidth"):
         charge = "PayByTraffic"
     mbps = int(package.get("Bandwidth") or 10)
+    status = package.get("NetworkPackageStatus") or ""
     return {
         "mode": "premium",
         "mbps": mbps,
         "charge": charge,
         "label": bandwidth_label_from("premium", mbps, charge),
         "package_id": package.get("NetworkPackageId") or "",
+        "status": status,
+        "updating": network_is_updating(network, status, clear_settled=clear_settled),
     }
 
 
-def create_premium_bandwidth(peak, charge):
+def create_premium_bandwidth(network, peak, charge):
     payload = call_ecd("CreateNetworkPackage", {
         "Bandwidth": peak,
-        "OfficeSiteId": DIRECTORY_ID,
+        "OfficeSiteId": network.directory_id,
         "PayType": "PostPaid",
         "InternetChargeType": charge,
         "AutoPay": "true",
@@ -406,7 +698,8 @@ def release_network_package(package_id):
     )
 
 
-def set_office_bandwidth(mode, mbps, charge):
+def set_office_bandwidth(network, mode, mbps, charge):
+    network = network_or_default(network)
     if mode == "premium":
         peak = int(mbps or 0)
         if peak < 2 or peak > 200:
@@ -416,20 +709,35 @@ def set_office_bandwidth(mode, mbps, charge):
     else:
         peak = 0
         charge = "PayByTraffic"
-    current = office_network_package()
+    current = office_network_package(network)
+    status = (current or {}).get("NetworkPackageStatus") or ""
+    if status in NETWORK_BUSY_STATUSES:
+        raise AlibabaApiError(
+            "The network is still updating. Wait until the progress bar finishes before changing it again."
+        )
+    mark_network_busy(network)
+    try:
+        with in_region(network.region.region_id):
+            return _apply_office_bandwidth(network, mode, peak, charge, current)
+    except Exception:
+        clear_network_busy(network)
+        raise
+
+
+def _apply_office_bandwidth(network, mode, peak, charge, current):
     if mode != "premium":
         if current and current.get("NetworkPackageId"):
             release_network_package(current["NetworkPackageId"])
         return "No premium"
     if current is None:
-        create_premium_bandwidth(peak, charge)
+        create_premium_bandwidth(network, peak, charge)
         return bandwidth_label_from("premium", peak, charge)
     package_id = current.get("NetworkPackageId")
     current_charge = current.get("InternetChargeType") or "PayByTraffic"
     current_peak = int(current.get("Bandwidth") or 0)
     if current_charge != charge:
         release_network_package(package_id)
-        create_premium_bandwidth(peak, charge)
+        create_premium_bandwidth(network, peak, charge)
         return bandwidth_label_from("premium", peak, charge)
     if current_peak != peak:
         call_ecd("ModifyNetworkPackageBandwidth", {
@@ -440,11 +748,20 @@ def set_office_bandwidth(mode, mbps, charge):
     return bandwidth_label_from("premium", peak, charge)
 
 
-def create_cloud_desktop(name, profile=None, end_user_id=""):
-    if not DIRECTORY_ID or DIRECTORY_ID == "xxxx":
-        raise AlibabaApiError("Set DIRECTORY_ID in local settings to the Hangzhou office network.")
+def create_cloud_desktop(name, profile=None, end_user_id="", network=None):
+    if profile is not None and profile.office_network_id:
+        network = profile.office_network
+    network = network_or_default(network)
+    with in_region(network.region.region_id):
+        return _create_cloud_desktop(name, profile, end_user_id, network)
 
+
+def _create_cloud_desktop(name, profile, end_user_id, network):
     desktop_type, spec, system_disk, data_disk = resolve_desktop_spec(profile)
+    if network.desktop_types and desktop_type not in network.desktop_types:
+        raise AlibabaApiError(
+            "{} does not sell this desktop type. Pick a profile made for that office network.".format(network)
+        )
     if not valid_disk_size(system_disk, SYSTEM_DISK_MIN, SYSTEM_DISK_MAX):
         raise AlibabaApiError(
             "This profile asks for a {} GiB system disk. Use 60 to 2040 GiB, in steps of 10. It must be greater than the 50 GiB image.".format(
@@ -464,8 +781,8 @@ def create_cloud_desktop(name, profile=None, end_user_id=""):
     extra = {
         "DesktopName": name,
         "Amount": 1,
-        "OfficeSiteId": DIRECTORY_ID,
-        "PolicyGroupId": desktop_policy_id(),
+        "OfficeSiteId": network.directory_id,
+        "PolicyGroupId": desktop_policy_id(network.region.region_id),
         "ChargeType": "PostPaid",
         "BundleId": bundle_id,
     }
@@ -480,6 +797,8 @@ def create_cloud_desktop(name, profile=None, end_user_id=""):
         "desktop_type": desktop_type,
         "system_disk": system_disk,
         "data_disk": data_disk,
+        "region": network.region.region_id,
+        "directory_id": network.directory_id,
     }
 
 
@@ -487,23 +806,25 @@ BUSY_STATUSES = ("Creating", "Starting", "Stopping", "Updating", "Upgrading")
 HOURS_IN_MONTH = 730
 
 
-def desktop_hourly_price(desktop_type, system_disk, data_disk):
+def desktop_hourly_price(desktop_type, system_disk, data_disk, region_id=None):
     if not desktop_type:
         return None
-    cache_key = "ecd-price:v2:{}:{}:{}".format(desktop_type, system_disk or 0, data_disk or 0)
+    region_id = region_id or current_region()
+    cache_key = "ecd-price:v3:{}:{}:{}:{}".format(region_id, desktop_type, system_disk or 0, data_disk or 0)
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
-    payload = call_ecd("DescribePrice", {
-        "ResourceType": "Desktop",
-        "InstanceType": desktop_type,
-        "RootDiskSizeGib": system_disk or 80,
-        "UserDiskSizeGib": data_disk or 0,
-        "OsType": "Windows",
-        "PeriodUnit": "Hour",
-        "Period": 1,
-        "Amount": 1,
-    })
+    with in_region(region_id):
+        payload = call_ecd("DescribePrice", {
+            "ResourceType": "Desktop",
+            "InstanceType": desktop_type,
+            "RootDiskSizeGib": system_disk or 80,
+            "UserDiskSizeGib": data_disk or 0,
+            "OsType": "Windows",
+            "PeriodUnit": "Hour",
+            "Period": 1,
+            "Amount": 1,
+        })
     price = ((payload.get("PriceInfo") or {}).get("Price") or {})
     trade = price.get("TradePrice")
     if trade in (None, ""):
@@ -547,26 +868,29 @@ def desktop_hourly_price(desktop_type, system_disk, data_disk):
     return quoted
 
 
-def delete_cloud_desktop(vm_id):
+def delete_cloud_desktop(vm_id, region_id=None):
     if not vm_id:
         return
-    call_ecd("DeleteDesktops", {"DesktopId.1": vm_id})
+    with in_region(region_id):
+        call_ecd("DeleteDesktops", {"DesktopId.1": vm_id})
 
 
-def assign_desktop_user(vm_id, end_user_id=""):
+def assign_desktop_user(vm_id, end_user_id="", region_id=None):
     extra = {"DesktopId": vm_id}
     if end_user_id:
         extra["EndUserId.1"] = end_user_id
-    call_ecd("ModifyEntitlement", extra)
+    with in_region(region_id):
+        call_ecd("ModifyEntitlement", extra)
 
 
-def modify_desktop_spec(vm_id, desktop_type, system_disk=None, data_disk=None):
+def modify_desktop_spec(vm_id, desktop_type, system_disk=None, data_disk=None, region_id=None):
     extra = {"DesktopId": vm_id, "DesktopType": desktop_type}
     if system_disk is not None:
         extra["RootDiskSizeGib"] = int(system_disk)
     if data_disk is not None:
         extra["UserDiskSizeGib"] = int(data_disk)
-    call_ecd("ModifyDesktopSpec", extra)
+    with in_region(region_id):
+        call_ecd("ModifyDesktopSpec", extra)
 
 
 WUYING_USER_STATUS = {0: "Active", 9: "Locked"}
@@ -646,20 +970,51 @@ def create_wuying_user(end_user_id, email, password, display_name=""):
         )
 
 
+def each_region(fetch, region_ids=None):
+    """Run fetch(region_id) in every enabled region. One unreachable region does not hide the others."""
+    region_ids = region_ids or enabled_region_ids()
+    results = []
+    errors = []
+    for region_id in region_ids:
+        try:
+            with in_region(region_id):
+                results.extend(fetch(region_id))
+        except AlibabaApiError as exc:
+            errors.append(exc)
+    if errors and len(errors) == len(region_ids):
+        raise errors[0]
+    return results
+
+
+def desktop_region(desktop_id):
+    if not desktop_id:
+        return None
+    return VirtualMachine.objects.filter(vm_id=desktop_id).values_list("region", flat=True).first()
+
+
 def refresh_desktop(vm):
     if vm is None or not vm.vm_id:
         return vm
-    payload = call_ecd("DescribeDesktops", {"DesktopId.1": vm.vm_id, "MaxResults": 1})
-    desktops = payload.get("Desktops") or []
-    if desktops:
-        saved = apply_desktop(desktops[0])
-        if saved is None:
-            return None
-        vm.refresh_from_db()
+    with in_region(vm.region):
+        payload = call_ecd("DescribeDesktops", {"DesktopId.1": vm.vm_id, "MaxResults": 1})
+        desktops = payload.get("Desktops") or []
+        if desktops:
+            saved = apply_desktop(desktops[0])
+            if saved is None:
+                return None
+            vm.refresh_from_db()
     return vm
 
 
 def describe_recordings(start, end, desktop_id=""):
+    region = desktop_region(desktop_id)
+    return each_region(
+        lambda region_id: _describe_recordings(start, end, desktop_id),
+        [region] if region else None,
+    )
+
+
+def _describe_recordings(start, end, desktop_id=""):
     extra = {
         "MaxResults": 100,
         "NeedSignedUrl": True,
@@ -701,12 +1056,33 @@ def recording_signed_url(file_path):
 
 
 def describe_desktops():
+    networks = enabled_networks()
+    if not networks:
+        return _describe_desktops(DIRECTORY_ID if DIRECTORY_ID != "xxxx" else "")
+    desktops = []
+    errors = []
+    for network in networks:
+        try:
+            with in_region(network.region.region_id):
+                found = _describe_desktops(network.directory_id)
+        except AlibabaApiError as exc:
+            errors.append(exc)
+            continue
+        for desktop in found:
+            desktop["_region"] = network.region.region_id
+        desktops.extend(found)
+    if errors and len(errors) == len(networks):
+        raise errors[0]
+    return desktops
+
+
+def _describe_desktops(directory_id):
     desktops = []
     next_token = ""
     for _ in range(20):
         extra = {"MaxResults": 100}
-        if DIRECTORY_ID and DIRECTORY_ID != "xxxx":
-            extra["DirectoryId"] = DIRECTORY_ID
+        if directory_id:
+            extra["DirectoryId"] = directory_id
         if next_token:
             extra["NextToken"] = next_token
         payload = call_ecd("DescribeDesktops", extra)
@@ -714,6 +1090,8 @@ def describe_desktops():
         next_token = payload.get("NextToken") or ""
         if not next_token:
             break
+    for desktop in desktops:
+        desktop["_region"] = current_region()
     return desktops
 
 
@@ -740,6 +1118,21 @@ def parse_alibaba_time(value):
 
 
 def describe_signin_events(start, end, end_user_id=""):
+    events = []
+    seen = set()
+    for event in each_region(lambda region_id: _describe_signin_events(start, end, end_user_id)):
+        key = event.get("EventId") or (
+            event.get("EventType"), event.get("EventTime"), event.get("EndUserId"), event.get("DesktopId"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        events.append(event)
+    events.sort(key=lambda event: event.get("EventTime") or "", reverse=True)
+    return events
+
+
+def _describe_signin_events(start, end, end_user_id=""):
     extra = {
         "StartTime": start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "EndTime": end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -792,12 +1185,13 @@ def apply_desktop(desktop):
         VirtualMachine.objects.filter(vm_id=vm_id).delete()
         return None
 
+    region_id = desktop.get("_region") or current_region()
     vm, _created = VirtualMachine.objects.get_or_create(
         vm_id=vm_id,
-        defaults={"region": REGION_ID, "status": "Creating"},
+        defaults={"region": region_id, "status": "Creating"},
     )
     vm.name = desktop.get("DesktopName") or vm.name
-    vm.region = REGION_ID
+    vm.region = region_id
     vm.directory_id = desktop.get("DirectoryId") or desktop.get("OfficeSiteId") or vm.directory_id
     vm.status = STATUS_FROM_CLOUD.get(cloud_status, "Error")
     if vm.status == "Error":
@@ -826,6 +1220,10 @@ def apply_desktop(desktop):
         profile = VMProfile.objects.filter(instance_type_code=desktop_type).first()
         if profile:
             vm.current_profile = profile
+
+    started = parse_alibaba_time(desktop.get("StartTime"))
+    if started:
+        vm.last_start_time = started
 
     end_user_ids = desktop.get("EndUserIds") or []
     if isinstance(end_user_ids, str):
@@ -871,16 +1269,18 @@ def client_ip(request):
     return request.META.get("REMOTE_ADDR") or None
 
 
-def write_log(request, vm, action, details="", old_value="", new_value="", desktop_name="", cloud_id=""):
+def write_log(request, vm, action, details="", old_value="", new_value="", desktop_name="", cloud_id="", region=""):
     user = request.user if getattr(request.user, "is_authenticated", False) else None
     if vm is not None:
         desktop_name = desktop_name or (vm.name or "")
         cloud_id = cloud_id or (vm.vm_id or "")
+        region = region or (vm.region or "")
     ActivityLog.objects.create(
         actor=user,
         virtual_machine=vm,
         desktop_name=(desktop_name or "")[:255],
         cloud_id=(cloud_id or "")[:200],
+        region=(region or "")[:50],
         action=action or "",
         old_value=old_value or "",
         new_value=new_value or "",
@@ -894,7 +1294,8 @@ def operate_desktop(request, vm, action, ecd_action, next_status, time_field):
     if not vm.vm_id:
         raise AlibabaApiError("This desktop has no Alibaba desktop ID yet.")
     try:
-        call_ecd(ecd_action, {"DesktopId.1": vm.vm_id})
+        with in_region(vm.region):
+            call_ecd(ecd_action, {"DesktopId.1": vm.vm_id})
     except AlibabaApiError as exc:
         write_log(request, vm, "API Error", f"{exc.code}: {exc}")
         raise
@@ -908,13 +1309,15 @@ def operate_desktop(request, vm, action, ecd_action, next_status, time_field):
     return vm
 
 
-def connection_ticket(vm):
+def connection_ticket(vm, client_type=""):
     if not vm.vm_id:
         raise AlibabaApiError("This desktop has no Alibaba desktop ID yet.")
     if vm.status != "Running":
         raise AlibabaApiError("The desktop must be Running before a connection ticket can be issued.")
 
     extra = {"DesktopId": vm.vm_id}
+    if client_type:
+        extra["ClientType"] = client_type
     end_user_id = ""
     if vm.user_id:
         profile = Profile.objects.filter(user_id=vm.user_id).first()
@@ -928,7 +1331,8 @@ def connection_ticket(vm):
         params = dict(extra)
         if task_id:
             params["TaskId"] = task_id
-        payload = call_ecd("GetConnectionTicket", params)
+        with in_region(vm.region):
+            payload = call_ecd("GetConnectionTicket", params)
         status = payload.get("TaskStatus")
         ticket = payload.get("Ticket")
         if status == "FINISHED" and ticket:
@@ -938,6 +1342,11 @@ def connection_ticket(vm):
         task_id = payload.get("TaskId") or task_id
         time.sleep(1)
     raise AlibabaApiError("The connection ticket is still being prepared. Try again in a moment.")
+
+
+def desktop_auth_code(vm):
+    """Browser connection ticket. It lasts 10 minutes and is fetched again for each open."""
+    return connection_ticket(vm, client_type="html5")
 
 
 def run_desktop_action(request, pk, action, ecd_action, next_status, time_field):

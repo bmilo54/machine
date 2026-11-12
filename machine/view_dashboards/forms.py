@@ -4,6 +4,7 @@ import string
 from datetime import timedelta
 
 from django import forms
+from django.forms import formset_factory
 from django.contrib.auth.forms import AuthenticationForm
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
@@ -30,7 +31,29 @@ from apps.virtuals.choices import (
     valid_disk_size,
     valid_grown_disk,
 )
-from apps.virtuals.models import ActivityLog, VMProfile, VirtualMachine
+from apps.virtuals.models import ActivityLog, CloudRegion, OfficeNetwork, VMProfile, VirtualMachine
+from view_api.views import default_network
+
+
+def office_network_queryset():
+    return (
+        OfficeNetwork.objects.filter(region__enabled=True)
+        .exclude(status="Missing")
+        .select_related("region")
+        .order_by("region__name", "name", "directory_id")
+    )
+
+
+def sold_type_choices(desktop_types):
+    """DESKTOP_TYPE_CHOICES limited to the types one office network sells."""
+    if not desktop_types:
+        return DESKTOP_TYPE_CHOICES
+    choices = []
+    for group, options in DESKTOP_TYPE_CHOICES:
+        kept = [option for option in options if option[0] in desktop_types]
+        if kept:
+            choices.append((group, kept))
+    return choices
 
 
 def end_user_queryset():
@@ -55,21 +78,59 @@ class DashboardLoginForm(AuthenticationForm):
 
 
 class DesktopCreateForm(forms.ModelForm):
+    office_network = forms.ModelChoiceField(
+        label="Office network",
+        queryset=OfficeNetwork.objects.none(),
+        empty_label=None,
+        help_text="The region and office network the computer is created in. Only turned-on regions are listed.",
+    )
+
     class Meta:
         model = VirtualMachine
-        fields = ("name", "user", "current_profile")
+        fields = ("name", "office_network", "user", "current_profile")
 
     def __init__(self, *args, **kwargs):
         super(DesktopCreateForm, self).__init__(*args, **kwargs)
         self.fields["name"].required = True
         self.fields["name"].label = "Desktop name"
-        self.fields["name"].help_text = "Windows 11 Pro in China (Hangzhou). Billing is pay-as-you-go."
+        self.fields["name"].help_text = "Windows 11 Pro. Billing is pay-as-you-go."
+        self.fields["office_network"].queryset = office_network_queryset()
+        if not self.is_bound:
+            network = default_network()
+            if network is not None:
+                self.fields["office_network"].initial = network.pk
         self.fields["user"].required = False
         self.fields["user"].queryset = end_user_queryset()
         self.fields["user"].help_text = "Optional. The desktop is assigned to this user in the dashboard."
         self.fields["current_profile"].required = False
-        self.fields["current_profile"].queryset = VMProfile.objects.order_by("name")
-        self.fields["current_profile"].help_text = "Leave empty for 4 vCPU, 8 GB, an 80 GB system disk, and no data disk. Internet is set once on Network."
+        self.fields["current_profile"].queryset = VMProfile.objects.select_related("office_network__region").order_by("name")
+        self.fields["current_profile"].label_from_instance = lambda profile: "{}{}".format(
+            profile.name or "VM profile",
+            " · {}".format(profile.office_network) if profile.office_network_id else "",
+        )
+        self.fields["current_profile"].help_text = (
+            "Only profiles for the chosen office network are listed. Leave empty for 4 vCPU, 8 GB, "
+            "an 80 GB system disk, and no data disk. Internet is set on Network."
+        )
+
+    def clean(self):
+        cleaned = super(DesktopCreateForm, self).clean()
+        network = cleaned.get("office_network")
+        profile = cleaned.get("current_profile")
+        if network is None:
+            return cleaned
+        if profile is not None and profile.office_network_id and profile.office_network_id != network.pk:
+            self.add_error(
+                "current_profile",
+                "This profile is for {}. Pick a profile made for {}.".format(profile.office_network, network),
+            )
+        type_id = (profile.instance_type_code if profile else "") or "eds.general.4c8g"
+        if network.desktop_types and type_id not in network.desktop_types:
+            self.add_error(
+                "current_profile" if profile else "office_network",
+                "{} does not sell this desktop type.".format(network),
+            )
+        return cleaned
 
     def clean_name(self):
         name = self.cleaned_data["name"].strip()
@@ -88,7 +149,7 @@ class OfficeNetworkForm(forms.Form):
             ("premium", "Premium bandwidth"),
         ),
         initial="basic",
-        help_text="One plan for the Singapore office network. Every computer uses it.",
+        help_text="One plan for this office network. Every computer in it uses it.",
     )
     bandwidth_mbps = forms.IntegerField(
         label="Peak bandwidth (Mbps)",
@@ -96,7 +157,7 @@ class OfficeNetworkForm(forms.Form):
         max_value=200,
         initial=10,
         widget=forms.NumberInput(attrs={"step": 1, "min": 2, "max": 200}),
-        help_text="Used only for premium bandwidth. No premium sets this back to 10 Mbps.",
+        help_text="Total for all computers together, not per computer. Used only for premium bandwidth. No premium sets this back to 10 Mbps.",
     )
     internet_charge_type = forms.ChoiceField(
         label="Bandwidth billing",
@@ -134,6 +195,174 @@ class OfficeNetworkForm(forms.Form):
         return cleaned
 
 
+class RegionSelectForm(forms.Form):
+    regions = forms.ModelMultipleChoiceField(
+        label="Regions in use",
+        queryset=CloudRegion.objects.none(),
+        required=False,
+        widget=forms.CheckboxSelectMultiple,
+        help_text="Tick every region you create computers in. Saving loads each ticked region's office networks and desktop types from Alibaba.",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super(RegionSelectForm, self).__init__(*args, **kwargs)
+        self.fields["regions"].queryset = CloudRegion.objects.exclude(
+            name__icontains="closed down", enabled=False,
+        ).order_by("name", "region_id")
+        self.fields["regions"].label_from_instance = lambda region: (
+            "{} ({})".format(region.name, region.region_id) if region.name and region.name != region.region_id
+            else region.region_id
+        )
+        if not self.is_bound:
+            self.fields["regions"].initial = list(CloudRegion.objects.filter(enabled=True).values_list("pk", flat=True))
+
+    def clean_regions(self):
+        chosen = self.cleaned_data["regions"]
+        chosen_ids = {region.pk for region in chosen}
+        blocked = []
+        for region in CloudRegion.objects.filter(enabled=True).exclude(pk__in=chosen_ids):
+            count = VirtualMachine.objects.filter(region=region.region_id).exclude(vm_id="").count()
+            if count:
+                blocked.append("{} still has {} computer{}".format(region, count, "" if count == 1 else "s"))
+        if blocked:
+            raise forms.ValidationError(
+                "{}. Delete them first or keep the region ticked.".format("; ".join(blocked))
+            )
+        if not chosen:
+            raise forms.ValidationError("Tick at least one region.")
+        return chosen
+
+
+WEBSITE_GUIDE = [
+    {
+        "title": "Blacklist.",
+        "text": "The listed sites do not open. Every other site still opens. Add youtube.com and *.youtube.com to block YouTube. Use one row per domain.",
+    },
+    {
+        "title": "Whitelist.",
+        "text": "Only the listed sites open. Everything else is blocked, so include every site the work needs.",
+    },
+    {
+        "title": "Who it covers.",
+        "text": "Saving changes every Windows computer that already uses the policy selected above, not only new ones. It does not follow the bandwidth plan.",
+    },
+]
+
+RESERVED_WEBSITE_DOMAINS = (
+    "gws.aliyun",
+    "aliyun.com",
+    "alicdn.com",
+    "aliyunpds.com",
+    "aliyuncds.com",
+    "aliyuncs.com",
+)
+
+
+def normalize_website(line):
+    text = (line or "").strip().lower()
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    text = text.split("/")[0].split("?")[0].split(":")[0]
+    return text
+
+
+def valid_website(domain):
+    if domain.startswith("*."):
+        name = domain[2:]
+    else:
+        name = domain
+    if not name or "*" in name or " " in name:
+        return False
+    labels = name.split(".")
+    if len(labels) < 2:
+        return False
+    for label in labels:
+        if not label or label.startswith("-") or label.endswith("-"):
+            return False
+        if not re.fullmatch(r"[a-z0-9-]+", label):
+            return False
+    return True
+
+
+def reserved_website(domain):
+    name = domain[2:] if domain.startswith("*.") else domain
+    return any(name == item or name.endswith("." + item) for item in RESERVED_WEBSITE_DOMAINS)
+
+
+class RegionPolicyForm(forms.Form):
+    policy_group_id = forms.ChoiceField(
+        label="Recording policy",
+        choices=[],
+        required=False,
+        help_text="Applied to new computers in this region. Policies only work in their own region.",
+    )
+    website_mode = forms.ChoiceField(
+        label="Website access",
+        choices=(
+            ("off", "No restriction"),
+            ("blacklist", "Blacklist these websites"),
+            ("whitelist", "Whitelist these websites"),
+        ),
+        initial="off",
+        help_text="Controls which websites a computer can open. Bandwidth does not do this.",
+    )
+
+    def __init__(self, *args, policies=None, **kwargs):
+        super(RegionPolicyForm, self).__init__(*args, **kwargs)
+        self.fields["policy_group_id"].choices = [("", "Alibaba default policy")] + list(policies or [])
+        self.fields["website_mode"].guide = WEBSITE_GUIDE
+
+
+class WebsiteRuleForm(forms.Form):
+    domain = forms.CharField(
+        label="Website",
+        required=False,
+        max_length=253,
+        widget=forms.TextInput(attrs={
+            "placeholder": "youtube.com",
+            "class": "form-control",
+            "autocomplete": "off",
+        }),
+    )
+
+
+WebsiteRuleFormSet = formset_factory(
+    WebsiteRuleForm,
+    extra=1,
+    can_delete=True,
+    max_num=299,
+    validate_max=True,
+)
+
+
+def website_domains(formset):
+    """Domains to save. None means a row is invalid."""
+    domains = []
+    failed = False
+    for item in formset:
+        if not hasattr(item, "cleaned_data"):
+            failed = True
+            continue
+        if item.cleaned_data.get("DELETE"):
+            continue
+        raw = item.cleaned_data.get("domain") or ""
+        domain = normalize_website(raw)
+        if not domain or domain in domains:
+            continue
+        if not valid_website(domain):
+            item.add_error("domain", "Use a domain such as youtube.com or *.youtube.com.")
+            failed = True
+            continue
+        if reserved_website(domain):
+            item.add_error("domain", "Alibaba always allows {}, so a rule for it has no effect.".format(domain))
+            failed = True
+            continue
+        domains.append(domain)
+    if failed:
+        return None
+    return domains
+
+
 class DesktopSpecForm(forms.Form):
     desktop_type = forms.ChoiceField(
         label="Desktop type",
@@ -154,6 +383,14 @@ class DesktopSpecForm(forms.Form):
         super(DesktopSpecForm, self).__init__(*args, **kwargs)
         family = desktop_type_family(desktop.desktop_type)
         choices = family_type_choices(desktop.desktop_type)
+        network = OfficeNetwork.objects.filter(directory_id=desktop.directory_id).first()
+        if network is not None and network.desktop_types:
+            sold = set(network.desktop_types) | {desktop.desktop_type}
+            choices = [
+                (group, [option for option in options if option[0] in sold])
+                for group, options in choices
+            ]
+            choices = [(group, options) for group, options in choices if options]
         if choices:
             self.fields["desktop_type"].choices = choices
             self.fields["desktop_type"].initial = desktop.desktop_type
@@ -191,12 +428,16 @@ class DesktopSpecForm(forms.Form):
             raise forms.ValidationError("This desktop has no Alibaba computer yet.")
         if not desktop.desktop_type or desktop.desktop_type not in DESKTOP_TYPE_SPECS:
             raise forms.ValidationError("Sync this desktop from Alibaba so its type is known, then change it.")
+        if desktop.status in ("Upgrading", "Updating"):
+            raise forms.ValidationError(
+                "This computer is still updating. Wait until the progress bar finishes before changing it again."
+            )
         if desktop.status != "Stopped":
             raise forms.ValidationError(
                 "Stop this computer first. It is currently {}.".format(desktop.get_status_display())
             )
         if type_id != desktop.desktop_type and desktop_type_family(type_id) != family:
-            self.add_error("desktop_type", "Stay in the same family. General Office, Graphics Workstation (Basic), and Professional Workstation each stay in their own list. Cloud Computer Graphics can only move to Graphics Workstation (Ultimate).")
+            self.add_error("desktop_type", "Stay in the same family. This computer can only move to another size in its own list.")
         data_floor = SPEC_DATA_MIN.get(family, SPEC_DATA_MIN["office"])
         if not valid_grown_disk(system_disk, desktop.system_disk, SPEC_SYSTEM_MIN, SPEC_SYSTEM_MAX):
             self.add_error(
@@ -251,7 +492,15 @@ class VirtualMachineForm(forms.ModelForm):
 DESKTOP_TYPE_GUIDE = [
     {
         "title": "General Office.",
-        "text": "Everyday work: browser, Office, email, and light applications. No GPU. This is the Singapore office type and the lower price.",
+        "text": "Everyday work: browser, Office, email, and light applications. CPU and RAM only, no GPU. Sold outside mainland China, including Singapore.",
+    },
+    {
+        "title": "Enterprise Office.",
+        "text": "The mainland China office type. CPU and RAM only, no GPU. It is not the same family as General Office, so a computer cannot move between them.",
+    },
+    {
+        "title": "High Frequency Office.",
+        "text": "A faster CPU for office work. CPU and RAM only, no GPU. Sold in some China regions, Hong Kong, and Tokyo.",
     },
     {
         "title": "Cloud Computer Graphics.",
@@ -259,11 +508,15 @@ DESKTOP_TYPE_GUIDE = [
     },
     {
         "title": "Graphics Workstation (Ultimate).",
-        "text": "Design, 3D, and video. The GPU is an NVIDIA RTX 5880, from 8 to 24 GiB.",
+        "text": "Design, 3D, and video. The GPU is an NVIDIA RTX 5880, from 2 to 24 GiB.",
     },
     {
         "title": "Professional Workstation.",
-        "text": "Heavy GPU and AI work. The GPU is an NVIDIA RTX 5880 with 48 GiB. Highest price. It cannot be changed into the other graphics families.",
+        "text": "Heavy GPU and AI work. The GPU is an NVIDIA RTX 5880, from 48 GiB upward. It cannot be changed into the other graphics families.",
+    },
+    {
+        "title": "Enterprise Graphics.",
+        "text": "Graphics sizes sold in some China regions, Hong Kong, Tokyo, and Frankfurt. The GPU is an NVIDIA A10, from 2 to 8 GiB. No GPU is not an option in this family.",
     },
     {
         "title": "Graphics Workstation (Basic).",
@@ -304,12 +557,12 @@ DATA_DISK_GUIDE = [
 
 BANDWIDTH_GUIDE = [
     {
-        "title": "Singapore.",
-        "text": "A computer in this region reaches the internet through premium bandwidth. No premium leaves it without internet.",
+        "title": "Internet.",
+        "text": "A computer reaches the internet through its office network's premium bandwidth. No premium leaves it without internet.",
     },
     {
         "title": "Shared peak.",
-        "text": "This page is the only place that sets internet. Every computer in the Singapore office network shares this one peak.",
+        "text": "Each office network has one plan. Every computer in that office network shares this one peak, so two busy computers split it. Other office networks have their own plan.",
     },
     {
         "title": "Billing.",
@@ -319,11 +572,17 @@ BANDWIDTH_GUIDE = [
 
 
 class VMProfileForm(forms.ModelForm):
+    office_network = forms.ModelChoiceField(
+        label="Office network",
+        queryset=OfficeNetwork.objects.none(),
+        empty_label=None,
+        help_text="Region and office network this profile creates computers in. The desktop type list follows it.",
+    )
     instance_type_code = forms.ChoiceField(
         label="Desktop type",
         choices=DESKTOP_TYPE_CHOICES,
         initial="eds.general.4c8g",
-        help_text="Same list as the Singapore console. Cloud Computer Graphics, Graphics Workstation (Ultimate), and Professional Workstation use an NVIDIA RTX 5880. Graphics Workstation (Basic) uses an NVIDIA T4.",
+        help_text="Only the types Alibaba sells in the chosen office network. Enterprise Office and High Frequency Office are CPU and RAM only. Enterprise Graphics uses an NVIDIA A10.",
     )
     system_disk = forms.IntegerField(
         label="System disk (GiB)",
@@ -344,6 +603,14 @@ class VMProfileForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super(VMProfileForm, self).__init__(*args, **kwargs)
+        networks = office_network_queryset()
+        if self.instance.pk and self.instance.office_network_id:
+            networks = networks | OfficeNetwork.objects.filter(pk=self.instance.office_network_id)
+        self.fields["office_network"].queryset = networks.distinct()
+        if not self.instance.pk and not self.is_bound:
+            network = default_network()
+            if network is not None:
+                self.fields["office_network"].initial = network.pk
         self.fields["instance_type_code"].guide = DESKTOP_TYPE_GUIDE
         self.fields["system_disk"].guide = SYSTEM_DISK_GUIDE
         self.fields["data_disk"].guide = DATA_DISK_GUIDE
@@ -352,10 +619,22 @@ class VMProfileForm(forms.ModelForm):
         model = VMProfile
         fields = (
             'name',
+            'office_network',
             'instance_type_code',
             'system_disk',
             'data_disk',
         )
+
+    def clean(self):
+        cleaned = super(VMProfileForm, self).clean()
+        network = cleaned.get("office_network")
+        type_id = cleaned.get("instance_type_code")
+        if network is not None and type_id and network.desktop_types and type_id not in network.desktop_types:
+            self.add_error(
+                "instance_type_code",
+                "{} does not sell this desktop type. Pick one from the list for that office network.".format(network),
+            )
+        return cleaned
 
     def clean_system_disk(self):
         size = self.cleaned_data["system_disk"]

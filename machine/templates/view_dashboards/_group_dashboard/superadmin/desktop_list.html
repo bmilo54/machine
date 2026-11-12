@@ -15,6 +15,19 @@
     </div>
 </div>
 
+{% if network_banner %}
+<div class="update-progress mb-3" data-network-poll="{% url 'view_dashboards:office_network_progress' network_banner.network.pk %}">
+    <div class="d-flex justify-content-between align-items-center gap-3">
+        <strong>Updating network · {{ network_banner.network }}</strong>
+        <span data-network-label>{{ network_banner.status }}</span>
+    </div>
+    <div class="progress mt-2" style="height: 8px;">
+        <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%; background-color: #072F1F;"></div>
+    </div>
+    <p class="form-text mb-0 mt-2">Every computer in this office network uses this plan. Wait until the bar finishes before changing Network again.{% if network_banner.label %} Now {{ network_banner.label }}.{% endif %}</p>
+</div>
+{% endif %}
+
 <div class="table-card-custom">
     <div class="table-responsive">
         <table class="table-custom">
@@ -44,7 +57,7 @@
                         {% if desktop.status_detail %}
                         <div class="text-muted-green small mt-1">{{ desktop.status_detail }}</div>
                         {% endif %}
-                        <div class="text-muted-green small mt-1" data-desktop-note="{{ desktop.pk }}"{% if desktop.status != 'Upgrading' and desktop.status != 'Updating' %} style="display: none;"{% endif %}>Upgrading</div>
+                        <div class="text-muted-green small mt-1" data-desktop-note="{{ desktop.pk }}"{% if desktop.status != 'Upgrading' and desktop.status != 'Updating' %} style="display: none;"{% endif %}>Updating. Wait before changing specifications again.</div>
                         <div class="progress mt-2" data-desktop-bar="{{ desktop.pk }}" style="height: 6px;{% if desktop.status not in busy_statuses %} display: none;{% endif %}">
                             <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%; background-color: #072F1F;"></div>
                         </div>
@@ -64,11 +77,14 @@
                             -
                         {% endif %}
                     </td>
-                    <td>{{ desktop.region }}</td>
+                    <td>
+                        <div>{{ desktop.region_label|default:"-" }}</div>
+                        {% if desktop.network_label %}<div class="table-user-sub">{{ desktop.network_label }}</div>{% endif %}
+                    </td>
                     <td class="text-center">
                         {% if desktop.user.profile.eds_end_user_id %}
                         <button class="table-btn-action border-0 bg-transparent" type="button" title="Copy sign-in info for {{ desktop.user }}"
-                                data-copy-signin data-username="{{ desktop.user.profile.eds_end_user_id }}"
+                                data-copy-signin data-office-network="{{ desktop.directory_id }}" data-username="{{ desktop.user.profile.eds_end_user_id }}"
                                 data-password="{{ desktop.user.profile.wuying_password }}">
                             <i class="bi bi-clipboard"></i>
                         </button>
@@ -166,9 +182,34 @@
     setTimeout(tick, 8000);
 })();
 </script>
+<script>
+(function () {
+    var box = document.querySelector("[data-network-poll]");
+    if (!box) return;
+    var tries = 0;
+    function tick() {
+        fetch(box.getAttribute("data-network-poll"), {headers: {"Accept": "application/json"}})
+            .then(function (response) { return response.json(); })
+            .then(function (payload) {
+                var label = box.querySelector("[data-network-label]");
+                if (label && payload.label) label.textContent = payload.label;
+                if (!payload.updating) {
+                    window.location.reload();
+                    return;
+                }
+                tries += 1;
+                if (tries < 150) setTimeout(tick, 4000);
+            })
+            .catch(function () {
+                tries += 1;
+                if (tries < 150) setTimeout(tick, 4000);
+            });
+    }
+    setTimeout(tick, 4000);
+})();
+</script>
 {{ wuying_download_url|json_script:"wuying-download-url" }}
 {{ wuying_web_url|json_script:"wuying-web-url" }}
-{{ office_network_id|json_script:"wuying-office-network-id" }}
 <script>
 document.querySelectorAll("[data-copy-signin]").forEach(function (button) {
     button.addEventListener("click", function () {
@@ -178,7 +219,7 @@ document.querySelectorAll("[data-copy-signin]").forEach(function (button) {
             "1. Download the Wuying app: " + read("wuying-download-url"),
             "   Or open it in a browser: " + read("wuying-web-url"),
             "2. Choose 企业版 & 商业版 (Enterprise).",
-            "3. Office network ID: " + read("wuying-office-network-id"),
+            "3. Office network ID: " + button.dataset.officeNetwork,
         ];
         if (button.dataset.username) {
             lines.push("4. Username: " + button.dataset.username);

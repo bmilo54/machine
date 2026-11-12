@@ -142,7 +142,7 @@
                     {% if desktop.status_detail %}
                     <div class="text-muted-green small mt-1">{{ desktop.status_detail }}</div>
                     {% endif %}
-                    <div class="text-muted-green small mt-1" data-desktop-note="{{ desktop.pk }}"{% if desktop.status != 'Upgrading' and desktop.status != 'Updating' %} style="display: none;"{% endif %}>Specification change in progress.</div>
+                    <div class="text-muted-green small mt-1" data-desktop-note="{{ desktop.pk }}"{% if desktop.status != 'Upgrading' and desktop.status != 'Updating' %} style="display: none;"{% endif %}>Updating. Wait before changing specifications again.</div>
                     <div class="progress mt-2" data-desktop-bar="{{ desktop.pk }}" style="height: 6px;{% if not desktop_busy %} display: none;{% endif %}">
                         <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%; background-color: #072F1F;"></div>
                     </div>
@@ -167,12 +167,25 @@
                 <dt class="col-5">Internet</dt>
                 <dd class="col-7">
                     {{ bandwidth_label|default:"-" }}
-                    <div class="text-muted-green small mt-1">Shared by every computer. <a href="{% url 'view_dashboards:office_network' %}">Change it on Network</a>.</div>
+                    {% if network_updating and office_network %}
+                    <div class="mt-2" data-network-poll="{% url 'view_dashboards:office_network_progress' office_network.pk %}">
+                        <div class="d-flex justify-content-between">
+                            <span class="text-muted-green small">Updating network</span>
+                            <span class="text-muted-green small" data-network-label>{{ network_status }}</span>
+                        </div>
+                        <div class="progress mt-1" style="height: 8px;">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%; background-color: #072F1F;"></div>
+                        </div>
+                        <div class="text-muted-green small mt-1">Wait until this finishes before changing Network again.</div>
+                    </div>
+                    {% elif office_network %}
+                    <div class="text-muted-green small mt-1">Shared by every computer in {{ office_network.display_name }}. <a href="{% url 'view_dashboards:office_network_detail' office_network.pk %}">Change it on Network</a>.</div>
+                    {% endif %}
                 </dd>
                 <dt class="col-5">Region</dt>
-                <dd class="col-7">{{ desktop.region }}</dd>
-                <dt class="col-5">Directory</dt>
-                <dd class="col-7">{{ desktop.directory_id|default:"-" }}</dd>
+                <dd class="col-7">{{ region_label|default:"-" }}{% if region_label != desktop.region %} <span class="text-muted-green small">{{ desktop.region }}</span>{% endif %}</dd>
+                <dt class="col-5">Office network</dt>
+                <dd class="col-7">{% if office_network %}{{ office_network.display_name }} <span class="text-muted-green small">{{ desktop.directory_id }}</span>{% else %}{{ desktop.directory_id|default:"-" }}{% endif %}</dd>
                 <dt class="col-5">Private IP</dt>
                 <dd class="col-7">{{ desktop.private_ip|default:"-" }}</dd>
                 <dt class="col-5">Last start</dt>
@@ -255,6 +268,32 @@
             });
     }
     setTimeout(tick, 8000);
+})();
+</script>
+<script>
+(function () {
+    var box = document.querySelector("[data-network-poll]");
+    if (!box) return;
+    var tries = 0;
+    function tick() {
+        fetch(box.getAttribute("data-network-poll"), {headers: {"Accept": "application/json"}})
+            .then(function (response) { return response.json(); })
+            .then(function (payload) {
+                var label = box.querySelector("[data-network-label]");
+                if (label && payload.label) label.textContent = payload.label;
+                if (!payload.updating) {
+                    window.location.reload();
+                    return;
+                }
+                tries += 1;
+                if (tries < 150) setTimeout(tick, 4000);
+            })
+            .catch(function () {
+                tries += 1;
+                if (tries < 150) setTimeout(tick, 4000);
+            });
+    }
+    setTimeout(tick, 4000);
 })();
 </script>
 {% endblock extra_js %}

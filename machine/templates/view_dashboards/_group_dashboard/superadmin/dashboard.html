@@ -249,7 +249,7 @@
         <div>
             <h2 class="card-title mb-0">Payment for {{ cost.month_label }}</h2>
             <p class="cost-hero">{{ cost.total_label }}</p>
-            <p class="text-muted-green small mb-0">Estimate of what has built up so far. A computer that is still on keeps adding the hourly price until the person leaves or Stop is clicked.</p>
+            <p class="text-muted-green small mb-0">Estimate of what has built up so far. The full hourly price applies only while the computer is running.</p>
         </div>
     </div>
     <div class="cost-chart-wrap">
@@ -291,7 +291,7 @@
     </div>
     <p class="cost-note text-muted-green small mb-0">
         This is an estimate of what has built up so far, in US dollars. The line is that same amount. It does not add the rest of the month in advance.
-        Hours on use the full hourly price, from when the computer is created until the person leaves it, or until Stop is clicked.
+        Hours on use the full hourly price while the computer is running: from creation until Stop, or until the person has been away for more than 3 hours. Starting it again begins a new run.
         Disk hours are the rest of the time the computer exists.
         A computer created and deleted within the same hour stays off this estimate.
         {% if cost.unpriced %}{{ cost.unpriced }} desktop{{ cost.unpriced|pluralize }} still need a price. Sync from Alibaba.{% endif %}

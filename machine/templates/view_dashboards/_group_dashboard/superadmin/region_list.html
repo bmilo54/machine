@@ -1,0 +1,123 @@
+{% extends "view_dashboards/base.html" %}
+
+{% block extra_css %}
+<style>
+    .region-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+        gap: 0.5rem 1rem;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+    }
+    .region-grid label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.55rem 0.75rem;
+        border: 1px solid #DCFCE7;
+        border-radius: 10px;
+        cursor: pointer;
+    }
+    .region-grid input:checked + span {
+        font-weight: 600;
+    }
+    .region-grid label:has(input:checked) {
+        background: #F7FAF8;
+        border-color: #072F1F;
+    }
+    .region-code {
+        color: #6B7F75;
+        font-size: 0.8rem;
+    }
+</style>
+{% endblock extra_css %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Regions</h1>
+        <p class="page-subtitle">Pick the regions you create computers in. Each region has its own office networks, desktop types, prices, recording policy and bandwidth plan.</p>
+    </div>
+    <form method="post" action="{% url 'view_dashboards:region_sync' %}">
+        {% csrf_token %}
+        <button class="btn btn-outline-dark btn-sm" type="submit">Reload from Alibaba</button>
+    </form>
+</div>
+
+{% if enabled_rows %}
+<div class="table-card-custom mb-4">
+    <div class="table-header-control">
+        <h2 class="card-title mb-0">In use</h2>
+    </div>
+    <div class="table-responsive">
+        <table class="table-custom">
+            <thead>
+                <tr>
+                    <th>Region</th>
+                    <th>Office networks</th>
+                    <th>Recording policy</th>
+                    <th>Computers</th>
+                    <th>Profiles</th>
+                    <th class="text-center">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in enabled_rows %}
+                <tr>
+                    <td>
+                        <div class="table-user-name">{{ row.region.name|default:row.region.region_id }}</div>
+                        <div class="table-user-sub">{{ row.region.region_id }}</div>
+                    </td>
+                    <td>
+                        {% for network in row.networks %}
+                            <div class="mb-1">
+                                <a href="{% url 'view_dashboards:office_network_detail' network.pk %}">{{ network.display_name }}</a>
+                                <div class="table-user-sub">{{ network.directory_id }} · {{ network.desktop_types|length }} desktop types sold</div>
+                            </div>
+                        {% empty %}
+                            <span class="text-muted-green">None. Create one in the Alibaba console, then reload.</span>
+                        {% endfor %}
+                    </td>
+                    <td>{{ row.region.policy_group_name|default:row.region.policy_group_id|default:"Alibaba default policy" }}</td>
+                    <td>{{ row.computers }}</td>
+                    <td>{{ row.profiles }}</td>
+                    <td class="text-center">
+                        <a class="table-btn-action" href="{% url 'view_dashboards:region_policy' row.region.pk %}" title="Policy and websites">
+                            <i class="bi bi-camera-video"></i>
+                        </a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
+<form method="post" class="card" novalidate>
+    {% csrf_token %}
+    <h2 class="card-title mb-1">Regions in use</h2>
+    <p class="form-text mt-0 mb-3">{{ form.regions.help_text }} A region that still has computers cannot be turned off.</p>
+    {% if form.non_field_errors %}
+        <div class="alert alert-danger">{{ form.non_field_errors }}</div>
+    {% endif %}
+    {% if form.regions.errors %}
+        <div class="alert alert-danger">{{ form.regions.errors|join:" " }}</div>
+    {% endif %}
+    <ul class="region-grid">
+        {% for choice in form.regions %}
+        <li>
+            <label for="{{ choice.id_for_label }}">
+                {{ choice.tag }}
+                <span>{{ choice.choice_label }}</span>
+            </label>
+        </li>
+        {% endfor %}
+    </ul>
+    <div class="d-flex gap-2 mt-3">
+        <button class="btn btn-dark" type="submit">Save regions</button>
+        <a class="btn btn-outline-secondary" href="{{ cancel_url }}">Cancel</a>
+    </div>
+</form>
+{% endblock content %}

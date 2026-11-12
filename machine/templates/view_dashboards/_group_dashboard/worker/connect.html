@@ -1,0 +1,252 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="same-origin">
+    <title>{{ page_title }}</title>
+    <link rel="stylesheet" href="{% static 'libs/bootstrap-icons/bootstrap-icons.css' %}">
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            background: #0B130F;
+            color: #fff;
+            font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        }
+        .connect-shell {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+        .connect-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            height: 44px;
+            padding: 0 0.9rem;
+            background: #072F1F;
+            flex: none;
+        }
+        .connect-bar-name {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            font-size: 0.875rem;
+            font-weight: 600;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+        .connect-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            height: 30px;
+            padding: 0 0.75rem;
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            border-radius: 8px;
+            background: transparent;
+            color: #fff;
+            font-size: 0.8125rem;
+            font-weight: 600;
+            text-decoration: none;
+            cursor: pointer;
+        }
+        .connect-btn:hover {
+            background: rgba(255, 255, 255, 0.12);
+        }
+        .connect-stage {
+            position: relative;
+            flex: 1;
+            min-height: 0;
+            background: #000;
+        }
+        .connect-stage iframe {
+            display: block;
+            width: 100%;
+            height: 100%;
+            border: 0;
+        }
+        .connect-notice {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 1rem;
+            padding: 1.5rem;
+            background: #0B130F;
+            text-align: center;
+        }
+        .connect-notice[hidden] {
+            display: none;
+        }
+        .connect-notice p {
+            max-width: 28rem;
+            margin: 0;
+            color: rgba(255, 255, 255, 0.8);
+        }
+        .connect-spinner {
+            width: 34px;
+            height: 34px;
+            border: 3px solid rgba(255, 255, 255, 0.2);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: connect-spin 0.9s linear infinite;
+        }
+        @keyframes connect-spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+<div class="connect-shell">
+    <div class="connect-bar">
+        <span class="connect-bar-name" data-status>{{ computer.name|default:"My computer" }}</span>
+        <button class="connect-btn" type="button" data-fullscreen><i class="bi bi-arrows-fullscreen"></i> Full screen</button>
+        <a class="connect-btn" href="{% url 'view_dashboards:my_computer' %}" data-leave><i class="bi bi-x-lg"></i> Disconnect</a>
+    </div>
+    <div class="connect-stage" id="connect-stage">
+        <iframe id="session-iframe" title="{{ computer.name|default:'My computer' }}" allow="clipboard-read; clipboard-write; fullscreen; microphone; camera; autoplay"></iframe>
+        {% if sdk_ready %}
+        <div class="connect-notice" data-state="loading">
+            <span class="connect-spinner" aria-hidden="true"></span>
+            <p>Opening your computer…</p>
+        </div>
+        <div class="connect-notice" data-state="ended" hidden>
+            <p data-ended-text>You are disconnected.</p>
+            <div>
+                <button class="connect-btn" type="button" data-reconnect>Connect again</button>
+                <a class="connect-btn" href="{% url 'view_dashboards:my_computer' %}">Back</a>
+            </div>
+        </div>
+        {% else %}
+        <div class="connect-notice">
+            <p>Opening the computer in the browser is not set up yet. Ask your administrator.</p>
+            <a class="connect-btn" href="{% url 'view_dashboards:my_computer' %}">Back</a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% csrf_token %}
+
+{% if sdk_ready %}
+{{ session_config|json_script:"session-config" }}
+<script src="{% static sdk_script %}"></script>
+<script>
+(function () {
+    var config = JSON.parse(document.getElementById("session-config").textContent);
+    var stage = document.getElementById("connect-stage");
+    var loading = document.querySelector("[data-state='loading']");
+    var ended = document.querySelector("[data-state='ended']");
+    var endedText = document.querySelector("[data-ended-text]");
+    var csrf = document.querySelector("[name='csrfmiddlewaretoken']").value;
+    var status = document.querySelector("[data-status]");
+    var computerName = status.textContent;
+    var session = null;
+    var retried = false;
+    var leaving = false;
+    var connected = false;
+    var timer = null;
+
+    function show(state, text) {
+        loading.hidden = state !== "loading";
+        ended.hidden = state !== "ended";
+        if (text) endedText.textContent = text;
+        if (state === "loading") status.textContent = "Opening…";
+        if (state === "connected") status.textContent = computerName;
+        if (state === "ended") status.textContent = "Disconnected";
+    }
+
+    function fetchCode() {
+        return fetch(config.codeUrl, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {"X-CSRFToken": csrf, "Accept": "application/json"}
+        }).then(function (response) {
+            return response.json().then(function (payload) {
+                if (!response.ok || !payload.ticket) {
+                    throw new Error(payload.detail || "Your computer could not be opened.");
+                }
+                return payload.ticket;
+            });
+        });
+    }
+
+    function connect() {
+        show("loading");
+        fetchCode().then(function (ticket) {
+            session = Wuying.WebSDK.createSession("computer-" + config.desktopId, {
+                openType: "inline",
+                iframeId: "session-iframe",
+                sdkPath: "{% static sdk_container %}",
+                resourceType: "local",
+                connectType: "desktop",
+                regionId: config.regionId,
+                isOverseas: config.overseas,
+                logDisabled: true,
+                userInfo: {ticket: ticket},
+                desktopInfo: {desktopId: config.desktopId, loginRegionId: config.regionId},
+                uiConfig: {
+                    toolbar: {visible: false},
+                    language: "en-US",
+                    reconnectType: "simple",
+                    exitCheck: false
+                }
+            });
+            session.addHandle("onConnected", function () {
+                connected = true;
+                retried = false;
+                clearTimeout(timer);
+                show("connected");
+            });
+            session.addHandle("onDisConnected", function () {
+                if (!leaving) show("ended", "You are disconnected.");
+            });
+            session.addHandle("onError", function (data) {
+                var code = data && (data.code || data.errorCode || "");
+                if (!retried && (code === "MissingLoginToken" || code === "InvalidTimeStamp.Expired")) {
+                    retried = true;
+                    connect();
+                    return;
+                }
+                clearTimeout(timer);
+                show("ended", "Your computer could not be opened. Try again, or ask your administrator.");
+            });
+            session.start();
+            loading.hidden = true;
+            status.textContent = "Connecting…";
+            clearTimeout(timer);
+            timer = setTimeout(function () {
+                if (!connected) show("ended", "Your computer took too long to open. Try again.");
+            }, 45000);
+        }).catch(function (error) {
+            show("ended", error.message);
+        });
+    }
+
+    document.querySelector("[data-fullscreen]").addEventListener("click", function () {
+        if (document.fullscreenElement) {
+            document.exitFullscreen();
+        } else if (stage.requestFullscreen) {
+            stage.requestFullscreen();
+        }
+    });
+    document.querySelector("[data-leave]").addEventListener("click", function () {
+        leaving = true;
+        if (session) {
+            try { session.stop(); } catch (error) {}
+        }
+    });
+    document.querySelector("[data-reconnect]").addEventListener("click", function () {
+        retried = false;
+        connect();
+    });
+    connect();
+})();
+</script>
+{% endif %}
+</body>
+</html>
