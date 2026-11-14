@@ -120,6 +120,13 @@
         {% endif %}
         <div class="desktop-actions-group">
             <a class="desktop-action" href="{% url 'view_dashboards:desktop_spec' desktop.pk %}"><i class="bi bi-sliders" aria-hidden="true"></i> Specifications</a>
+            {% if desktop.vm_id %}
+            <a class="desktop-action" href="{% url 'view_dashboards:desktop_websites' desktop.pk %}"><i class="bi bi-shield-lock" aria-hidden="true"></i> Websites</a>
+            <form method="post" action="{% url 'view_dashboards:desktop_lock_secure_dns' desktop.pk %}">
+                {% csrf_token %}
+                <button class="desktop-action" type="submit" title="Stops Chrome and Edge from looking up websites on their own, so blacklist and whitelist keep working."><i class="bi bi-lock" aria-hidden="true"></i> Lock Secure DNS</button>
+            </form>
+            {% endif %}
             <a class="desktop-action" href="{% url 'view_dashboards:desktop_update' desktop.pk %}"><i class="bi bi-pencil" aria-hidden="true"></i> Edit</a>
             <a class="desktop-action desktop-action-danger" href="{% url 'view_dashboards:desktop_delete' desktop.pk %}"><i class="bi bi-trash" aria-hidden="true"></i> Delete</a>
         </div>
@@ -139,10 +146,7 @@
                 <dt class="col-5">Status</dt>
                 <dd class="col-7" data-desktop-status="{{ desktop.pk }}">
                     <span data-desktop-badge="{{ desktop.pk }}">{{ desktop.get_status_display }}</span>
-                    {% if desktop.status_detail %}
-                    <div class="text-muted-green small mt-1">{{ desktop.status_detail }}</div>
-                    {% endif %}
-                    <div class="text-muted-green small mt-1" data-desktop-note="{{ desktop.pk }}"{% if desktop.status != 'Upgrading' and desktop.status != 'Updating' %} style="display: none;"{% endif %}>Updating. Wait before changing specifications again.</div>
+                    <div class="text-muted-green small mt-1" data-desktop-note="{{ desktop.pk }}"{% if not desktop.status_detail and desktop.status != 'Upgrading' and desktop.status != 'Updating' %} style="display: none;"{% endif %}>{% if desktop.status_detail %}{{ desktop.status_detail }}{% else %}Updating. Wait before changing specifications again.{% endif %}</div>
                     <div class="progress mt-2" data-desktop-bar="{{ desktop.pk }}" style="height: 6px;{% if not desktop_busy %} display: none;{% endif %}">
                         <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%; background-color: #072F1F;"></div>
                     </div>
@@ -252,7 +256,17 @@
                     var note = document.querySelector('[data-desktop-note="' + row.id + '"]');
                     if (badge) badge.textContent = row.label;
                     if (bar) bar.style.display = row.busy ? "" : "none";
-                    if (note) note.style.display = row.status === "Upgrading" || row.status === "Updating" ? "" : "none";
+                    if (note) {
+                        if (row.detail) {
+                            note.textContent = row.detail;
+                            note.style.display = "";
+                        } else if (row.status === "Upgrading" || row.status === "Updating") {
+                            note.textContent = "Updating. Wait before changing specifications again.";
+                            note.style.display = "";
+                        } else {
+                            note.style.display = "none";
+                        }
+                    }
                     if (row.busy) stillBusy = true;
                 });
                 tries += 1;

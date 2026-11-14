@@ -12,7 +12,7 @@
     <ol class="mb-0">
         <li class="mb-4">
             <strong>Turn on the regions you use.</strong>
-            <p class="mb-1">Tick each region on the Regions page and save. The dashboard loads its office networks and the desktop types Alibaba sells there. Each region also has its own recording policy. The same policy page can blacklist or whitelist websites, such as blocking youtube.com, for every Windows computer that uses that policy. You can use several regions at the same time.</p>
+            <p class="mb-1">Tick each region on the Regions page and save. The dashboard loads its office networks and the desktop types Alibaba sells there. Each region also has its own recording policy. The region page sets the shared website list, such as blocking youtube.com. Open a computer and choose Websites when that computer needs a different list. After a website list is in use, open that computer and choose Lock Secure DNS so Chrome and Edge cannot walk around it. You can use several regions at the same time.</p>
             <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:region_list' %}"><i class="bi bi-globe2" aria-hidden="true"></i> Open Regions</a>
         </li>
         <li class="mb-4">
@@ -32,13 +32,18 @@
         </li>
         <li class="mb-4">
             <strong>Buy the computer.</strong>
-            <p class="mb-1">Pick the office network first. The user field can stay empty. Alibaba creates a Windows 11 Pro computer in that office network and bills it pay-as-you-go. New computers use the screen-recording policy set for their region on the Regions page. The status stays Creating until the computer is ready.</p>
+            <p class="mb-1">Pick the office network first. The user field can stay empty. Alibaba creates a Windows 11 Pro computer in that office network and bills it pay-as-you-go. New computers use the region's recording policy and its shared website list. Choose Websites on the computer when it needs its own list. The status stays Creating until the computer is ready.</p>
             <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:desktop_create' %}"><i class="bi bi-display" aria-hidden="true"></i> Create a cloud computer</a>
         </li>
         <li class="mb-4">
             <strong>Wait until the status is Running.</strong>
             <p class="mb-1">The desktop page updates itself. You can assign a user only after the computer is Running. If it is Stopped, start it first.</p>
             <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:desktop_list' %}"><i class="bi bi-list-ul" aria-hidden="true"></i> Open the desktop list</a>
+        </li>
+        <li class="mb-4">
+            <strong>Lock Secure DNS on each computer that uses a website list.</strong>
+            <p class="mb-1">A blacklist or whitelist stops the computer from finding blocked sites. Chrome and Edge can look up sites on their own with Secure DNS and walk around that list. Open the computer while it is Running, choose Lock Secure DNS, then close Chrome and Edge once and open them again. Do this once on every computer. After that, workers cannot turn Secure DNS back on unless they are administrators on that computer.</p>
+            <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:desktop_list' %}"><i class="bi bi-lock" aria-hidden="true"></i> Open the desktop list</a>
         </li>
         <li class="mb-4">
             <strong>Assign the computer after it exists.</strong>
@@ -72,9 +77,23 @@
         </li>
         <li class="mb-0">
             <strong>Screen recording reaches this dashboard after the person leaves and the computer stays running.</strong>
-            <p class="mb-1">Wuying records the whole session and shows the person a notice. A short piece stays on the computer until they close the Wuying window. That close leaves the computer Running, and the video uploads to the Alibaba console. Keep it Running for a few minutes so the upload can finish. Stopping or shutting down ends the upload, and that video does not arrive. Open Recordings after the upload. The page reads the same videos as the console. Play watches the video here. Download saves the file. Videos are kept for about 15 days.</p>
+            <p class="mb-1">Wuying records the whole session and shows the person a notice. A short piece stays on the computer until they close the Wuying window. That close leaves the computer Running, and the video uploads to the Alibaba console. Keep it Running for a few minutes so the upload can finish. Stopping or shutting down ends the upload, and that video does not arrive. Open Recordings after the upload. The page reads the same videos as the console. Play watches the video here. Download saves the file. The video list has its own time range. On the work report, choose the start and end dates and click Show. Write the work report then reads only the recordings in that range and writes what each person did. The report stays after the video is deleted. Videos are kept for about 15 days.</p>
             <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:recording_list' %}"><i class="bi bi-camera-video" aria-hidden="true"></i> Open recordings</a>
         </li>
+    </ol>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Move a computer to another region</h2>
+    </div>
+    <p>A computer stays in the region where it was bought. To take one from Hangzhou to Singapore, including the files already on its disks, make a new computer in Singapore from an image. The same steps work between any two regions.</p>
+    <ol class="mb-0">
+        <li class="mb-3">In the Alibaba console, open the computer in its current region and create a custom image. Set the image scope to the system disk and the data disk, so the data disk is included. Leave the computer running while the image is created.</li>
+        <li class="mb-3">Turn off cleaning leftover personal user data before you create the image. That option is on by default. While it is on, the image leaves out the person's own files. Installed applications stay either way.</li>
+        <li class="mb-3">Copy the image to the destination region, for example from Hangzhou to Singapore. The copy takes a while. The time depends on how much data is on the disks.</li>
+        <li class="mb-3">Buy a new computer in that region from the copied image. Its disks must be at least as large as the disks in the image. Choose that region's office network and assign the same user. On this dashboard, turn that region on first if it is not already in use.</li>
+        <li class="mb-0">The new computer has its own number and uses the destination region's recording policy. The original computer remains and keeps billing until you delete it. Check the files on the new computer first.</li>
     </ol>
 </div>
 {% endblock content %}

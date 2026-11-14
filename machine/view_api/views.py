@@ -56,6 +56,7 @@ STATUS_FROM_CLOUD = {
     "Rebuilding": "Creating",
     "Updating": "Upgrading",
     "Upgrading": "Upgrading",
+    "FotaUpdating": "Upgrading",
     "Expired": "Error",
 }
 RELEASED_STATUSES = {"Deleting", "Deleted", "Releasing", "Released"}
@@ -68,6 +69,7 @@ LIVE_CLOUD_STATUSES = {
     "Rebuilding",
     "Updating",
     "Upgrading",
+    "FotaUpdating",
 }
 
 
@@ -412,6 +414,24 @@ def describe_policy(policy_id):
         next_token = payload.get("NextToken") or ""
         if not next_token:
             break
+    # A region-free policy is stored in Alibaba's center. The desktop region
+    # can miss a policy that was just copied there.
+    payload = call_alibaba(
+        "ecd",
+        ECD_VERSION,
+        "DescribeCenterPolicyList",
+        {
+            "PolicyGroupId.1": policy_id,
+            "ResourceType": "desktop",
+            "BusinessType": 1,
+            "MaxResults": 20,
+        },
+        region="cn-shanghai",
+    )
+    for group in payload.get("DescribePolicyGroups") or payload.get("Policies") or []:
+        if group.get("PolicyGroupId") == policy_id:
+            group["ResourceRegionId"] = group.get("ResourceRegionId") or "center"
+            return group
     return None
 
 
@@ -453,6 +473,175 @@ def website_access(policy):
     }
 
 
+def desktop_policy_id_from(desktop):
+    policy_id = (desktop.get("PolicyGroupId") or "").strip()
+    if policy_id:
+        return policy_id
+    raw = desktop.get("PolicyGroupIds") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    for item in raw:
+        if isinstance(item, dict):
+            item = item.get("PolicyGroupId") or ""
+        item = (item or "").strip()
+        if item:
+            return item
+    return ""
+
+
+def fetch_desktop(vm):
+    if not vm.vm_id:
+        raise AlibabaApiError("This desktop has no Alibaba desktop ID yet.")
+    with in_region(vm.region):
+        payload = call_ecd("DescribeDesktops", {"DesktopId.1": vm.vm_id, "MaxResults": 1})
+    desktops = payload.get("Desktops") or []
+    if not desktops:
+        raise AlibabaApiError("Alibaba did not return this computer.")
+    return desktops[0]
+
+
+def policy_is_shared(vm, policy_id, policy=None):
+    """True when changing this policy would also change another computer or the region default."""
+    if not policy_id or policy_id == FALLBACK_POLICY_GROUP_ID:
+        return True
+    if policy is not None and (policy.get("PolicyGroupType") or "") == "SYSTEM":
+        return True
+    region = CloudRegion.objects.filter(region_id=vm.region).first()
+    if region is not None and region.policy_group_id == policy_id:
+        return True
+    return policy_used_by_others(policy_id, vm)
+
+
+def policy_used_by_others(policy_id, vm):
+    for desktop in describe_desktops():
+        if (desktop.get("DesktopId") or "") == (vm.vm_id or ""):
+            continue
+        if desktop_policy_id_from(desktop) == policy_id:
+            return True
+    return False
+
+
+def clone_policy(policy, name):
+    policy_id = policy.get("PolicyGroupId") or ""
+    if (policy.get("ResourceRegionId") or "") == "center":
+        # ClonePolicyGroup cannot see a center policy and returns PolicyGroupId not found.
+        payload = call_alibaba(
+            "ecd",
+            ECD_VERSION,
+            "CloneCenterPolicy",
+            {
+                "PolicyGroupId": policy_id,
+                "Name": name,
+                "ResourceType": "desktop",
+                "BusinessType": 1,
+            },
+            region="cn-shanghai",
+        )
+    else:
+        payload = call_alibaba(
+            "ecd",
+            ECD_VERSION,
+            "ClonePolicyGroup",
+            {"PolicyGroupId": policy_id, "Name": name},
+            region=current_region(),
+        )
+    new_id = (payload.get("PolicyGroupId") or "").strip()
+    if not new_id:
+        raise AlibabaApiError("Alibaba did not return the new policy.")
+    return new_id
+
+
+def discard_policy(policy_id, resource_region):
+    try:
+        if resource_region == "center":
+            call_alibaba(
+                "ecd",
+                ECD_VERSION,
+                "DeleteCenterPolicy",
+                {
+                    "PolicyGroupIds.1": policy_id,
+                    "ResourceType": "desktop",
+                    "BusinessType": 1,
+                },
+                region="cn-shanghai",
+            )
+            return
+        call_alibaba(
+            "ecd",
+            ECD_VERSION,
+            "DeletePolicyGroup",
+            {"PolicyGroupId": policy_id},
+            region=current_region(),
+        )
+    except AlibabaApiError:
+        return
+
+
+def assign_desktop_policy(vm, policy_id, resource_region=""):
+    if resource_region == "center":
+        # ModifyDesktopsPolicyGroup reports success and leaves a center policy in place.
+        payload = call_alibaba(
+            "ecd",
+            ECD_VERSION,
+            "ModifyResourceCenterPolicy",
+            {
+                "ResourceType": "desktop",
+                "ProductType": "desktop",
+                "ResourceRegionId": vm.region,
+                "ResourceIds.1": vm.vm_id,
+                "PolicyGroupType": "general",
+                "PolicyGroupIds.1": policy_id,
+            },
+            region="cn-shanghai",
+        )
+        for result in payload.get("ModifyResults") or []:
+            if result.get("CheckResult") is False:
+                raise AlibabaApiError("Alibaba could not attach this website list to the computer.")
+    else:
+        with in_region(vm.region):
+            payload = call_ecd(
+                "ModifyDesktopsPolicyGroup",
+                {"PolicyGroupId": policy_id, "DesktopId.1": vm.vm_id},
+            )
+        for result in payload.get("ModifyResults") or []:
+            code = (result.get("Code") or "").lower()
+            if code and code != "success":
+                raise AlibabaApiError(result.get("Message") or "Alibaba could not change this computer's policy.")
+    attached = desktop_policy_id_from(fetch_desktop(vm))
+    if attached != policy_id:
+        raise AlibabaApiError("Alibaba did not switch this computer onto its own website list.")
+
+
+def save_desktop_websites(vm, mode, domains):
+    """Copy a shared policy when needed, then change the website list for this computer only."""
+    refreshed = refresh_desktop(vm)
+    if refreshed is None:
+        raise AlibabaApiError("This computer was released on Alibaba.")
+    desktop = fetch_desktop(vm)
+    policy_id = desktop_policy_id_from(desktop)
+    if not policy_id:
+        raise AlibabaApiError("Alibaba did not return a policy for this computer.")
+    with in_region(vm.region):
+        policy = describe_policy(policy_id)
+    if policy is None:
+        raise AlibabaApiError("Alibaba did not return this computer's policy.")
+    shared = policy_is_shared(vm, policy_id, policy)
+    if not shared:
+        with in_region(vm.region):
+            set_website_access(policy_id, mode, domains)
+        return policy_id
+    name = "sites-{}".format((vm.vm_id or "computer").replace("ecd-", "")[:24])
+    with in_region(vm.region):
+        new_id = clone_policy(policy, name)
+        try:
+            set_website_access(new_id, mode, domains)
+            assign_desktop_policy(vm, new_id, policy.get("ResourceRegionId") or "")
+        except AlibabaApiError:
+            discard_policy(new_id, policy.get("ResourceRegionId") or "")
+            raise
+    return new_id
+
+
 def set_website_access(policy_id, mode, domains):
     """Blacklist blocks the listed domains. Whitelist allows only those domains."""
     policy = describe_policy(policy_id)
@@ -489,6 +678,93 @@ def set_website_access(policy_id, mode, domains):
         call_alibaba("ecd", ECD_VERSION, "ModifyCenterPolicy", extra, region="cn-shanghai")
         return
     call_ecd("ModifyPolicyGroup", extra)
+
+
+SECURE_DNS_LOCK_SCRIPT = (
+    "New-Item -Path 'HKLM:\\SOFTWARE\\Policies\\Google\\Chrome' -Force | Out-Null; "
+    "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Google\\Chrome' "
+    "-Name 'DnsOverHttpsMode' -Value 'off' -Type String; "
+    "New-Item -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge' -Force | Out-Null; "
+    "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge' "
+    "-Name 'DnsOverHttpsMode' -Value 'off' -Type String; "
+    "$chrome = (Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Google\\Chrome' "
+    "-Name 'DnsOverHttpsMode' -ErrorAction SilentlyContinue).DnsOverHttpsMode; "
+    "$edge = (Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge' "
+    "-Name 'DnsOverHttpsMode' -ErrorAction SilentlyContinue).DnsOverHttpsMode; "
+    "Write-Output ('chrome=' + $chrome + ' edge=' + $edge); "
+    "if ($chrome -ne 'off' -or $edge -ne 'off') { exit 1 }"
+)
+
+
+def lock_browser_secure_dns(vm):
+    """Turn off Chrome and Edge Secure DNS on one Windows computer so website lists cannot be bypassed."""
+    refreshed = refresh_desktop(vm)
+    if refreshed is None:
+        raise AlibabaApiError("This computer was released on Alibaba.")
+    if not vm.vm_id:
+        raise AlibabaApiError("This desktop has no Alibaba desktop ID yet.")
+    if vm.status != "Running":
+        raise AlibabaApiError(
+            "Start this computer first. Alibaba can only lock Secure DNS while the computer is Running."
+        )
+    with in_region(vm.region):
+        payload = call_ecd(
+            "RunCommand",
+            {
+                "Type": "RunPowerShellScript",
+                "CommandContent": SECURE_DNS_LOCK_SCRIPT,
+                "ContentEncoding": "PlainText",
+                "CommandRole": "system",
+                "Timeout": 60,
+                "DesktopId.1": vm.vm_id,
+            },
+        )
+        invoke_id = (payload.get("InvokeId") or "").strip()
+        if not invoke_id:
+            raise AlibabaApiError("Alibaba did not start the Secure DNS lock.")
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            time.sleep(2)
+            status_payload = call_ecd(
+                "DescribeInvocations",
+                {
+                    "InvokeId": invoke_id,
+                    "IncludeOutput": "true",
+                    "IncludeInvokeDesktops": "true",
+                    "ContentEncoding": "PlainText",
+                    "MaxResults": 10,
+                },
+            )
+            invocations = status_payload.get("Invocations") or []
+            if not invocations:
+                continue
+            invocation = invocations[0]
+            overall = (invocation.get("InvocationStatus") or "").strip()
+            desktops = invocation.get("InvokeDesktops") or []
+            desktop = desktops[0] if desktops else {}
+            desktop_status = (desktop.get("InvocationStatus") or overall or "").strip()
+            if desktop_status in ("Pending", "Running", "Stopping") or overall in (
+                "Pending",
+                "Running",
+                "Stopping",
+            ):
+                continue
+            if desktop_status == "Success" or (
+                overall == "Success" and (desktop.get("ExitCode") in (0, "0", None, ""))
+            ):
+                output = (desktop.get("Output") or "").strip()
+                if "chrome=off" in output and "edge=off" in output:
+                    return invoke_id
+                if desktop.get("ExitCode") in (0, "0", None, ""):
+                    return invoke_id
+            error = (
+                desktop.get("ErrorInfo")
+                or desktop.get("ErrorCode")
+                or overall
+                or "Alibaba could not lock Secure DNS on this computer."
+            )
+            raise AlibabaApiError(error)
+        raise AlibabaApiError("Alibaba is still applying the Secure DNS lock. Try again in a minute.")
 
 
 def sync_region(region):
@@ -1194,7 +1470,9 @@ def apply_desktop(desktop):
     vm.region = region_id
     vm.directory_id = desktop.get("DirectoryId") or desktop.get("OfficeSiteId") or vm.directory_id
     vm.status = STATUS_FROM_CLOUD.get(cloud_status, "Error")
-    if vm.status == "Error":
+    if cloud_status == "FotaUpdating":
+        vm.status_detail = "Alibaba is upgrading this computer's system image. Wait until that finishes, then stop or start it."
+    elif vm.status == "Error":
         vm.status_detail = "Alibaba status: {}.".format(cloud_status or "not reported")
     else:
         vm.status_detail = ""

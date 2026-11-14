@@ -21,12 +21,14 @@ Django==6.1
 django-widget-tweaks==1.5.1
 frozenlist==1.8.0
 idna==3.20
+imageio-ffmpeg==0.8.1
 multidict==6.9.1
 propcache==0.5.4
 psycopg==3.3.6
 psycopg-binary==3.3.6
 psycopg2-binary==2.9.13
 pycparser==3.0
+Pillow==12.3.0
 requests==2.34.2
 sqlparse==0.6.0
 tzdata==2026.4

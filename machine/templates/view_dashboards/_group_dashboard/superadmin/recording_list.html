@@ -36,11 +36,87 @@
 <div class="page-header">
     <div>
         <h1 class="page-title">Recordings</h1>
-        <p class="page-subtitle">Screen recordings from Wuying. Play watches the video here. Download saves the file.</p>
+        <p class="page-subtitle">The video list is below. The date range is only for the work report. Play watches a video here. Download saves the file. The report stays after the video is deleted.</p>
     </div>
 </div>
 
-<form method="get" class="d-flex flex-wrap gap-2 mb-3">
+<div class="card mb-3">
+    <div class="card-header">
+        <h2 class="card-title">Work report</h2>
+        {% if range_ready and summaries_waiting %}
+        <button class="btn btn-dark btn-sm" type="button" data-summarize>Write the work report</button>
+        {% endif %}
+    </div>
+    <form method="get" class="d-flex flex-wrap align-items-end gap-2 mb-3">
+        <label class="d-flex flex-column gap-1 small">
+            From
+            <input class="form-control" type="date" name="from" value="{{ date_from }}" required>
+        </label>
+        <label class="d-flex flex-column gap-1 small">
+            To
+            <input class="form-control" type="date" name="to" value="{{ date_to }}" required>
+        </label>
+        <select class="form-select" name="report_user" aria-label="Work report user" style="max-width: 16rem;">
+            <option value="">All users</option>
+            {% for profile in wuying_users %}
+                <option value="{{ profile.eds_end_user_id }}" {% if report_user == profile.eds_end_user_id %}selected{% endif %}>
+                    {{ profile.eds_end_user_id }}{% if profile.user.username %} ({{ profile.user.username }}){% endif %}
+                </option>
+            {% endfor %}
+        </select>
+        <input type="hidden" name="days" value="{{ days }}">
+        <input type="hidden" name="user" value="{{ selected_user }}">
+        <input type="hidden" name="desktop" value="{{ selected_desktop }}">
+        <button class="btn btn-dark btn-sm" type="submit">Show</button>
+    </form>
+    {% if range_error %}
+    <div class="alert alert-warning">{{ range_error }}</div>
+    {% endif %}
+    {% if report_error %}
+    <div class="alert alert-warning">Could not load this date range: {{ report_error }}</div>
+    {% endif %}
+    {% if not range_ready %}
+    <p class="mb-0 text-muted-green">Choose a start date and an end date, then click Show. Writing the report reads only the recordings in that range.</p>
+    {% else %}
+    <p class="mb-2" data-summarize-status>
+        {% if summaries_waiting %}
+            {{ summaries_waiting }} recording{{ summaries_waiting|pluralize }} in this date range still need to be read.
+        {% else %}
+            This report covers the recordings from {{ range_start|date:"j M Y" }} to {{ range_end|date:"j M Y" }}.
+        {% endif %}
+    </p>
+    {% for note in work_notes %}
+    <div class="mb-3">
+        <strong>{{ note.person }}</strong>
+        <span class="text-muted-green">· {{ note.day|date:"j M Y" }}</span>
+        {% if note.report %}<p class="mb-1 mt-1">{{ note.report }}</p>{% endif %}
+        <ul class="mb-0 mt-1 small text-muted-green">
+            {% for line in note.lines %}
+            <li>{% if line.until and line.until != line.at %}{{ line.at }}–{{ line.until }}{% else %}{{ line.at }}{% endif %} · {{ line.text }}</li>
+            {% empty %}
+            <li class="text-muted-green">No picture in this recording.</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% empty %}
+    {% if not summaries_waiting and not report_error %}
+    <p class="mb-0 text-muted-green">No recordings in this date range.</p>
+    {% endif %}
+    {% endfor %}
+    <form method="post" action="{% url 'view_dashboards:recording_summarize' %}" data-summarize-form hidden>
+        {% csrf_token %}
+        <input type="hidden" name="from" value="{{ date_from }}">
+        <input type="hidden" name="to" value="{{ date_to }}">
+        <input type="hidden" name="report_user" value="{{ report_user }}">
+    </form>
+    {% endif %}
+</div>
+
+<form method="get" class="d-flex flex-wrap align-items-end gap-2 mb-3">
+    <select class="form-select" name="days" aria-label="Video list range" style="max-width: 10rem;">
+        <option value="7" {% if days == "7" %}selected{% endif %}>Last 7 days</option>
+        <option value="30" {% if days == "30" %}selected{% endif %}>Last 30 days</option>
+    </select>
     <select class="form-select" name="user" aria-label="Wuying user" style="max-width: 16rem;">
         <option value="">All users</option>
         {% for profile in wuying_users %}
@@ -57,10 +133,9 @@
             </option>
         {% endfor %}
     </select>
-    <select class="form-select" name="days" aria-label="Time range" style="max-width: 10rem;">
-        <option value="7" {% if days == "7" %}selected{% endif %}>Last 7 days</option>
-        <option value="30" {% if days == "30" %}selected{% endif %}>Last 30 days</option>
-    </select>
+    <input type="hidden" name="from" value="{{ date_from }}">
+    <input type="hidden" name="to" value="{{ date_to }}">
+    <input type="hidden" name="report_user" value="{{ report_user }}">
     <button class="btn btn-dark btn-sm" type="submit">Show</button>
 </form>
 
@@ -117,7 +192,7 @@
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="6" class="text-muted-green">No recordings in this period. A video appears after the person leaves and the computer stays running long enough to upload it.</td>
+                    <td colspan="6" class="text-muted-green">No recordings in the last {{ days }} days. A video appears after the person leaves and the computer stays running long enough to upload it.</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -161,5 +236,40 @@
         recordingVideo.removeAttribute("src");
         recordingVideo.load();
     });
+
+    var summarizeButton = document.querySelector("[data-summarize]");
+    var summarizeForm = document.querySelector("[data-summarize-form]");
+    var summarizeStatus = document.querySelector("[data-summarize-status]");
+    if (summarizeButton && summarizeForm) {
+        summarizeButton.addEventListener("click", function () {
+            summarizeButton.disabled = true;
+            var token = summarizeForm.querySelector("[name=csrfmiddlewaretoken]").value;
+            function step() {
+                if (summarizeStatus) summarizeStatus.textContent = "Reading a recording…";
+                fetch(summarizeForm.action, {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: {"X-CSRFToken": token, "Accept": "application/json"},
+                    body: new FormData(summarizeForm)
+                }).then(function (response) {
+                    return response.json().then(function (payload) {
+                        if (!payload.ok) {
+                            throw new Error(payload.error || "The summary could not be written.");
+                        }
+                        if (payload.remaining > 0) {
+                            if (summarizeStatus) summarizeStatus.textContent = payload.remaining + " recording(s) left.";
+                            step();
+                            return;
+                        }
+                        window.location.reload();
+                    });
+                }).catch(function (error) {
+                    if (summarizeStatus) summarizeStatus.textContent = error.message;
+                    summarizeButton.disabled = false;
+                });
+            }
+            step();
+        });
+    }
 </script>
 {% endblock extra_js %}

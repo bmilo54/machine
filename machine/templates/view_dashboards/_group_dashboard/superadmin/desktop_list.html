@@ -54,10 +54,7 @@
                         <span class="badge-table {% if desktop.status == 'Running' %}success{% elif desktop.status == 'Error' %}failed{% else %}pending{% endif %}" data-desktop-badge="{{ desktop.pk }}">
                             {{ desktop.get_status_display }}
                         </span>
-                        {% if desktop.status_detail %}
-                        <div class="text-muted-green small mt-1">{{ desktop.status_detail }}</div>
-                        {% endif %}
-                        <div class="text-muted-green small mt-1" data-desktop-note="{{ desktop.pk }}"{% if desktop.status != 'Upgrading' and desktop.status != 'Updating' %} style="display: none;"{% endif %}>Updating. Wait before changing specifications again.</div>
+                        <div class="text-muted-green small mt-1" data-desktop-note="{{ desktop.pk }}"{% if not desktop.status_detail and desktop.status != 'Upgrading' and desktop.status != 'Updating' %} style="display: none;"{% endif %}>{% if desktop.status_detail %}{{ desktop.status_detail }}{% else %}Updating. Wait before changing specifications again.{% endif %}</div>
                         <div class="progress mt-2" data-desktop-bar="{{ desktop.pk }}" style="height: 6px;{% if desktop.status not in busy_statuses %} display: none;{% endif %}">
                             <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%; background-color: #072F1F;"></div>
                         </div>
@@ -164,7 +161,17 @@
                         badge.className = "badge-table " + badgeClass(row.status);
                     }
                     if (bar) bar.style.display = row.busy ? "" : "none";
-                    if (note) note.style.display = row.status === "Upgrading" || row.status === "Updating" ? "" : "none";
+                    if (note) {
+                        if (row.detail) {
+                            note.textContent = row.detail;
+                            note.style.display = "";
+                        } else if (row.status === "Upgrading" || row.status === "Updating") {
+                            note.textContent = "Updating. Wait before changing specifications again.";
+                            note.style.display = "";
+                        } else {
+                            note.style.display = "none";
+                        }
+                    }
                     if (row.busy) stillBusy = true;
                 });
                 tries += 1;

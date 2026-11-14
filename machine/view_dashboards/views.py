@@ -29,6 +29,7 @@ from django.contrib.auth.models import User
 from apps.profiles.models import Profile
 from apps.virtuals.choices import DESKTOP_TYPE_SPECS, desktop_type_label, spec_summary
 from apps.virtuals.models import ActivityLog, CloudRegion, OfficeNetwork, VMProfile, VirtualMachine
+from apps.virtuals.screen_summary import parse_date_range, pending_count, recording_rows, summarize_next, work_notes
 from core.mixins import DashboardMixin, GroupRequiredMixin, WorkerRequiredMixin, is_worker
 from view_api.views import (
     AlibabaApiError,
@@ -50,7 +51,12 @@ from view_api.views import (
     describe_signin_events,
     describe_policy,
     describe_policy_groups,
+    fetch_desktop,
+    policy_is_shared,
+    save_desktop_websites,
     set_website_access,
+    lock_browser_secure_dns,
+    desktop_policy_id_from,
     website_access,
     describe_wuying_users,
     default_network,
@@ -71,8 +77,11 @@ from view_api.views import (
 )
 from .forms import (
     OfficeNetworkForm,
+    DesktopWebsiteForm,
     RegionPolicyForm,
     WebsiteRuleFormSet,
+    display_websites,
+    expand_websites,
     website_domains,
     RegionSelectForm,
     DashboardLoginForm,
@@ -1131,6 +1140,143 @@ class RegionSyncView(GroupRequiredMixin, DashboardMixin, View):
         return HttpResponseRedirect(reverse('view_dashboards:region_list'))
 
 
+class DesktopWebsiteView(GroupRequiredMixin, DashboardFormMixin, FormView):
+    group_required = ['superadmin']
+    form_class = DesktopWebsiteForm
+    cancel_url_name = 'view_dashboards:desktop_list'
+
+    def dispatch(self, request, *args, **kwargs):
+        self.desktop = get_object_or_404(VirtualMachine, pk=kwargs['pk'])
+        self.current_access = {"mode": "off", "domains": [], "editable": False, "name": ""}
+        self.shared_policy = True
+        self._websites_loaded = False
+        return super(DesktopWebsiteView, self).dispatch(request, *args, **kwargs)
+
+    def _load_websites(self):
+        if self._websites_loaded:
+            return
+        self._websites_loaded = True
+        if not self.desktop.vm_id:
+            return
+        try:
+            cloud = fetch_desktop(self.desktop)
+            policy_id = desktop_policy_id_from(cloud)
+            with in_region(self.desktop.region):
+                policy = describe_policy(policy_id)
+            self.current_access = website_access(policy)
+            self.shared_policy = policy_is_shared(self.desktop, policy_id, policy)
+        except AlibabaApiError as exc:
+            messages.warning(self.request, "Could not load this computer's websites: {}".format(exc))
+
+    def get_website_formset(self):
+        initial = [{"domain": domain} for domain in display_websites(self.current_access["domains"])]
+        if self.request.method == "POST":
+            return WebsiteRuleFormSet(self.request.POST, prefix="websites")
+        return WebsiteRuleFormSet(initial=initial, prefix="websites")
+
+    def post(self, request, *args, **kwargs):
+        form = self.get_form()
+        formset = self.get_website_formset()
+        self.website_formset = formset
+        if form.is_valid() and formset.is_valid() and self._apply_website_domains(form, formset):
+            return self.form_valid(form)
+        return self.render_to_response(self.get_context_data(form=form, website_formset=formset))
+
+    def _apply_website_domains(self, form, formset):
+        mode = form.cleaned_data.get("website_mode") or "off"
+        domains = website_domains(formset)
+        if domains is None:
+            return False
+        if mode == "off":
+            form.cleaned_data["websites"] = []
+            return True
+        if not domains:
+            form.add_error("website_mode", "Add at least one domain, or choose no restriction.")
+            return False
+        form.cleaned_data["websites"] = domains
+        return True
+
+    def get_form_kwargs(self):
+        self._load_websites()
+        kwargs = super(DesktopWebsiteView, self).get_form_kwargs()
+        if not self.request.POST:
+            kwargs["initial"] = {"website_mode": self.current_access["mode"]}
+        return kwargs
+
+    def get_context_data(self, **kwargs):
+        context = super(DesktopWebsiteView, self).get_context_data(**kwargs)
+        if "website_formset" not in context:
+            context["website_formset"] = getattr(self, "website_formset", None) or self.get_website_formset()
+        context["page_title"] = "Websites for {}".format(self.desktop.name or "this computer")
+        context["main_nav"] = "desktops"
+        context["submit_label"] = "Save websites"
+        context["cancel_url"] = reverse("view_dashboards:desktop_detail", args=[self.desktop.pk])
+        if self.shared_policy:
+            context["page_subtitle"] = (
+                "This computer still uses the shared list. Saving copies it and applies the change only here. "
+                "Other computers stay as they are."
+            )
+        else:
+            context["page_subtitle"] = (
+                "This computer already has its own list. Saving changes only this computer."
+            )
+        return context
+
+    def form_valid(self, form):
+        if not self.desktop.vm_id:
+            form.add_error(None, "Save an Alibaba desktop ID before setting websites.")
+            return self.form_invalid(form)
+        mode = form.cleaned_data["website_mode"]
+        domains = form.cleaned_data["websites"]
+        if mode == self.current_access["mode"] and domains == expand_websites(self.current_access["domains"]):
+            messages.info(self.request, "No change to this computer's websites.")
+            return HttpResponseRedirect(reverse("view_dashboards:desktop_detail", args=[self.desktop.pk]))
+        try:
+            save_desktop_websites(self.desktop, mode, domains)
+        except AlibabaApiError as exc:
+            log_desktop(self.request, self.desktop, "API Error", details=str(exc))
+            form.add_error(None, str(exc))
+            return self.form_invalid(form)
+        log_desktop(
+            self.request,
+            self.desktop,
+            "Update",
+            old_value=self.current_access["mode"],
+            new_value="{} {}".format(mode, ", ".join(domains)),
+            details="Changed which websites this computer can open.",
+        )
+        messages.success(self.request, "Saved the website list for this computer only.")
+        return HttpResponseRedirect(reverse("view_dashboards:desktop_detail", args=[self.desktop.pk]))
+
+
+class DesktopSecureDnsView(GroupRequiredMixin, DashboardMixin, View):
+    group_required = ['superadmin']
+
+    def post(self, request, pk):
+        vm = get_object_or_404(VirtualMachine, pk=pk)
+        detail_url = reverse("view_dashboards:desktop_detail", args=[pk])
+        if not vm.vm_id:
+            messages.error(request, "Save an Alibaba desktop ID before locking Secure DNS.")
+            return HttpResponseRedirect(detail_url)
+        try:
+            lock_browser_secure_dns(vm)
+        except AlibabaApiError as exc:
+            log_desktop(request, vm, "API Error", details=str(exc))
+            messages.error(request, str(exc))
+            return HttpResponseRedirect(detail_url)
+        log_desktop(
+            request,
+            vm,
+            "Update",
+            details="Locked Chrome and Edge Secure DNS so website lists cannot be bypassed.",
+        )
+        messages.success(
+            request,
+            "Secure DNS is locked on this computer. Close Chrome and Edge once, then open them again.",
+        )
+        return HttpResponseRedirect(detail_url)
+
+
 class RegionPolicyView(GroupRequiredMixin, DashboardFormMixin, FormView):
     group_required = ['superadmin']
     form_class = RegionPolicyForm
@@ -1162,7 +1308,7 @@ class RegionPolicyView(GroupRequiredMixin, DashboardFormMixin, FormView):
         return kwargs
 
     def get_website_formset(self):
-        initial = [{"domain": domain} for domain in self.current_access["domains"]]
+        initial = [{"domain": domain} for domain in display_websites(self.current_access["domains"])]
         if self.request.method == "POST":
             return WebsiteRuleFormSet(self.request.POST, prefix="websites")
         return WebsiteRuleFormSet(initial=initial, prefix="websites")
@@ -1198,7 +1344,7 @@ class RegionPolicyView(GroupRequiredMixin, DashboardFormMixin, FormView):
         context['submit_label'] = 'Save policy'
         context['page_subtitle'] = (
             'The recording policy applies to new computers in {}. '
-            'The website list applies to every Windows computer already using that policy.'
+            'The website list is the shared list. A computer with its own list, set on that computer, is not changed.'
         ).format(self.region)
         return context
 
@@ -1207,7 +1353,7 @@ class RegionPolicyView(GroupRequiredMixin, DashboardFormMixin, FormView):
         mode = form.cleaned_data['website_mode']
         domains = form.cleaned_data['websites']
         websites_changed = (
-            mode != self.current_access['mode'] or domains != self.current_access['domains']
+            mode != self.current_access['mode'] or domains != expand_websites(self.current_access['domains'])
         )
         if websites_changed:
             if not policy_id:
@@ -1774,8 +1920,13 @@ class RecordingListView(GroupRequiredMixin, DashboardMixin, TemplateView):
         days = self.request.GET.get("days", "7")
         if days not in ("7", "30"):
             days = "7"
+        selected_range, range_error = parse_date_range(
+            self.request.GET.get("from"),
+            self.request.GET.get("to"),
+        )
         selected_user = (self.request.GET.get("user") or "").strip()
         selected_desktop = (self.request.GET.get("desktop") or "").strip()
+        report_user = (self.request.GET.get("report_user") or "").strip()
         profiles = list(
             Profile.objects.exclude(eds_end_user_id__isnull=True)
             .exclude(eds_end_user_id="")
@@ -1787,15 +1938,27 @@ class RecordingListView(GroupRequiredMixin, DashboardMixin, TemplateView):
         known_desktops = {desktop.vm_id for desktop in desktops}
         if selected_user and selected_user not in known_ids:
             selected_user = ""
+        if report_user and report_user not in known_ids:
+            report_user = ""
         if selected_desktop and selected_desktop not in known_desktops:
             selected_desktop = ""
         context["days"] = days
+        context["date_from"] = selected_range[2] if selected_range else (self.request.GET.get("from") or "")
+        context["date_to"] = selected_range[3] if selected_range else (self.request.GET.get("to") or "")
+        context["range_start"] = selected_range[0] if selected_range else None
+        context["range_end"] = selected_range[1] if selected_range else None
+        context["range_ready"] = selected_range is not None
+        context["range_error"] = range_error
         context["selected_user"] = selected_user
         context["selected_desktop"] = selected_desktop
+        context["report_user"] = report_user
         context["wuying_users"] = profiles
         context["desktops"] = desktops
         context["recording_error"] = ""
         context["recordings"] = []
+        context["work_notes"] = []
+        context["summaries_waiting"] = 0
+        context["report_error"] = ""
 
         end = timezone.now()
         start = end - timedelta(days=int(days))
@@ -1803,7 +1966,7 @@ class RecordingListView(GroupRequiredMixin, DashboardMixin, TemplateView):
             raw_recordings = describe_recordings(start, end, selected_desktop)
         except AlibabaApiError as exc:
             context["recording_error"] = str(exc)
-            return context
+            raw_recordings = []
 
         names = {profile.eds_end_user_id: profile.user.username for profile in profiles}
         desktop_links = {desktop.vm_id: desktop for desktop in desktops}
@@ -1816,6 +1979,8 @@ class RecordingListView(GroupRequiredMixin, DashboardMixin, TemplateView):
             if selected_user and selected_user not in end_user_ids:
                 continue
             started = parse_alibaba_time(item.get("StartTime"))
+            if started is not None and (started < start or started > end):
+                continue
             finished = parse_alibaba_time(item.get("EndTime"))
             size = int(item.get("RecordingSize") or 0)
             if size >= 1024 * 1024:
@@ -1838,7 +2003,28 @@ class RecordingListView(GroupRequiredMixin, DashboardMixin, TemplateView):
             })
         rows.sort(key=lambda row: row["started"] or start, reverse=True)
         context["recordings"] = rows
+        if selected_range is not None:
+            try:
+                report_rows = recording_rows(selected_range[0], selected_range[1], report_user)
+            except AlibabaApiError as exc:
+                context["report_error"] = str(exc)
+            else:
+                context["work_notes"] = work_notes(report_rows)
+                context["summaries_waiting"] = pending_count(report_rows)
         return context
+
+
+class RecordingSummarizeView(GroupRequiredMixin, DashboardMixin, View):
+    group_required = ['superadmin']
+
+    def post(self, request, *args, **kwargs):
+        selected_range, range_error = parse_date_range(request.POST.get("from"), request.POST.get("to"))
+        if selected_range is None:
+            return JsonResponse({"ok": False, "error": range_error or "Choose a start date and an end date first."}, status=400)
+        report_user = (request.POST.get("report_user") or "").strip()
+        payload = summarize_next(selected_range[0], selected_range[1], report_user, "")
+        status = 200 if payload.get("ok") else 502
+        return JsonResponse(payload, status=status)
 
 
 RECORDING_PATH = re.compile(r"^[A-Za-z0-9_./+-]+\.mp4$")
@@ -1956,6 +2142,7 @@ class DesktopProgressView(GroupRequiredMixin, DashboardMixin, View):
                 "id": vm.pk,
                 "status": vm.status,
                 "label": vm.get_status_display(),
+                "detail": vm.status_detail,
                 "busy": vm.status in BUSY_STATUSES,
             })
 
@@ -2055,6 +2242,12 @@ class DesktopPowerView(GroupRequiredMixin, DashboardMixin, View):
         if action == "start" and vm.status == "Running":
             messages.info(request, "This computer is already running.")
             return HttpResponseRedirect(detail_url)
+        if vm.status in ("Upgrading", "Updating"):
+            messages.info(
+                request,
+                vm.status_detail or "This computer is still updating. Wait until that finishes, then try again.",
+            )
+            return HttpResponseRedirect(detail_url)
         try:
             operate_desktop(request, vm, *spec)
         except AlibabaApiError as exc:
@@ -2148,6 +2341,9 @@ class MyComputerStartView(WorkerRequiredMixin, View):
             pass
         if vm.status == "Running":
             messages.info(request, "Your computer is already on.")
+            return HttpResponseRedirect(back)
+        if vm.status in ("Upgrading", "Updating"):
+            messages.info(request, "Your computer is being updated. Wait until that finishes.")
             return HttpResponseRedirect(back)
         if vm.status != "Stopped":
             messages.info(request, "Your computer is busy. Wait a moment and try again.")

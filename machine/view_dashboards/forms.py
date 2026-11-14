@@ -236,7 +236,7 @@ class RegionSelectForm(forms.Form):
 WEBSITE_GUIDE = [
     {
         "title": "Blacklist.",
-        "text": "The listed sites do not open. Every other site still opens. Add youtube.com and *.youtube.com to block YouTube. Use one row per domain.",
+        "text": "Type the site people open, such as youtube.com. The dashboard also covers www and the other addresses that site uses. One row per website.",
     },
     {
         "title": "Whitelist.",
@@ -244,7 +244,30 @@ WEBSITE_GUIDE = [
     },
     {
         "title": "Who it covers.",
-        "text": "Saving changes every Windows computer that already uses the policy selected above, not only new ones. It does not follow the bandwidth plan.",
+        "text": "This is the shared list. It applies to new computers and to computers that do not have their own list yet. Open a computer and choose Websites to give that computer a different list.",
+    },
+    {
+        "title": "Keep the list working.",
+        "text": "On each computer, open the detail page and choose Lock Secure DNS while it is Running. That stops Chrome and Edge from looking up websites on their own and walking around the list.",
+    },
+]
+
+DESKTOP_WEBSITE_GUIDE = [
+    {
+        "title": "Blacklist.",
+        "text": "Type the site people open, such as youtube.com. The dashboard also covers www and the other addresses that site uses. One row per website.",
+    },
+    {
+        "title": "Whitelist.",
+        "text": "Only the listed sites open. Everything else is blocked, so include every site the work needs.",
+    },
+    {
+        "title": "This computer only.",
+        "text": "Saving changes this computer and leaves the others as they are. The first save copies the shared list. A blacklist and a whitelist cannot be used together.",
+    },
+    {
+        "title": "Keep the list working.",
+        "text": "After you save, open this computer's detail page and choose Lock Secure DNS while it is Running. Close Chrome and Edge once after that. Do the same on every computer that uses a website list.",
     },
 ]
 
@@ -304,13 +327,30 @@ class RegionPolicyForm(forms.Form):
             ("whitelist", "Whitelist these websites"),
         ),
         initial="off",
-        help_text="Controls which websites a computer can open. Bandwidth does not do this.",
+        help_text="Type the website, such as youtube.com. www and the site's other addresses are included.",
     )
 
     def __init__(self, *args, policies=None, **kwargs):
         super(RegionPolicyForm, self).__init__(*args, **kwargs)
         self.fields["policy_group_id"].choices = [("", "Alibaba default policy")] + list(policies or [])
         self.fields["website_mode"].guide = WEBSITE_GUIDE
+
+
+class DesktopWebsiteForm(forms.Form):
+    website_mode = forms.ChoiceField(
+        label="Website access",
+        choices=(
+            ("off", "No restriction"),
+            ("blacklist", "Blacklist these websites"),
+            ("whitelist", "Whitelist these websites"),
+        ),
+        initial="off",
+        help_text="Type the website, such as youtube.com. www and the site's other addresses are included. Other computers are not changed.",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super(DesktopWebsiteForm, self).__init__(*args, **kwargs)
+        self.fields["website_mode"].guide = DESKTOP_WEBSITE_GUIDE
 
 
 class WebsiteRuleForm(forms.Form):
@@ -333,6 +373,58 @@ WebsiteRuleFormSet = formset_factory(
     max_num=299,
     validate_max=True,
 )
+
+
+YOUTUBE_WEBSITES = (
+    "youtube.com",
+    "*.youtube.com",
+    "youtu.be",
+    "*.googlevideo.com",
+)
+
+
+def website_root(domain):
+    name = domain[2:] if domain.startswith("*.") else domain
+    if name.startswith("www."):
+        name = name[4:]
+    return name
+
+
+def expand_websites(domains):
+    """Turn a normal website name into every address that site actually uses."""
+    expanded = []
+    for domain in domains:
+        root = website_root(domain)
+        if root in ("youtube.com", "youtu.be", "googlevideo.com", "youtube-nocookie.com"):
+            additions = YOUTUBE_WEBSITES
+        elif domain.startswith("*."):
+            additions = (domain[2:], domain)
+        else:
+            additions = (domain, "*." + domain)
+        for item in additions:
+            if item not in expanded:
+                expanded.append(item)
+    return expanded
+
+
+def display_websites(domains):
+    """Show one row for a site, not the extra addresses added on save."""
+    remaining = []
+    for domain in domains:
+        if domain not in remaining:
+            remaining.append(domain)
+    shown = []
+    if set(YOUTUBE_WEBSITES) <= set(remaining):
+        shown.append("youtube.com")
+        remaining = [domain for domain in remaining if domain not in YOUTUBE_WEBSITES]
+    seen = set()
+    for domain in remaining:
+        root = website_root(domain)
+        if root in seen:
+            continue
+        seen.add(root)
+        shown.append(root if root in remaining else domain)
+    return shown
 
 
 def website_domains(formset):
@@ -360,7 +452,7 @@ def website_domains(formset):
         domains.append(domain)
     if failed:
         return None
-    return domains
+    return expand_websites(domains)
 
 
 class DesktopSpecForm(forms.Form):

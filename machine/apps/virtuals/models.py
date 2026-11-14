@@ -133,6 +133,43 @@ class VirtualMachine(TimeStampedModel):
         verbose_name_plural = "Virtual Machines"
 
 
+class ScreenSummary(TimeStampedModel):
+    """What was on screen during one recording. Kept after Alibaba deletes the video."""
+
+    file_path = models.CharField(max_length=1000, unique=True)
+    desktop_id = models.CharField(max_length=200, blank=True)
+    desktop_name = models.CharField(max_length=255, blank=True)
+    end_user_id = models.CharField(max_length=200, blank=True)
+    started = models.DateTimeField(null=True, blank=True)
+    finished = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, default="done")
+    detail = models.TextField(blank=True)
+    lines = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        ordering = ["-started", "-created"]
+
+    def __str__(self):
+        return self.desktop_name or self.file_path
+
+
+class WorkReport(TimeStampedModel):
+    """A written account of one person's screen for one day."""
+
+    end_user_id = models.CharField(max_length=200)
+    day = models.DateField()
+    report = models.TextField(blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["end_user_id", "day"], name="unique_work_report_day"),
+        ]
+        ordering = ["-day", "end_user_id"]
+
+    def __str__(self):
+        return "{} {}".format(self.end_user_id, self.day)
+
+
 class ActivityLog(TimeStampedModel):
     """
     操作审计日志表
