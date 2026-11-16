@@ -291,8 +291,9 @@
     </div>
     <p class="cost-note text-muted-green small mb-0">
         This is an estimate of what has built up so far, in US dollars. The line is that same amount. It does not add the rest of the month in advance.
-        Hours on use the full hourly price while the computer is running: from creation until Stop, or until the person has been away for more than 3 hours. Starting it again begins a new run.
+        Hours on use the full hourly price while the computer is running: from a Start or visit until Stop, or until the person has been away for more than 3 hours. Starting it again begins a new run.
         Disk hours are the rest of the time the computer exists.
+        It does not include bandwidth. Alibaba’s console total can still differ a little because of that and because of how Alibaba rounds each hour.
         A computer created and deleted within the same hour stays off this estimate.
         {% if cost.unpriced %}{{ cost.unpriced }} desktop{{ cost.unpriced|pluralize }} still need a price. Sync from Alibaba.{% endif %}
     </p>

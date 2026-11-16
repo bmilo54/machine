@@ -75,10 +75,15 @@
             <p class="mb-0">No office network is turned on yet. Open Regions first.</p>
             {% endfor %}
         </li>
-        <li class="mb-0">
+        <li class="mb-4">
             <strong>Screen recording reaches this dashboard after the person leaves and the computer stays running.</strong>
-            <p class="mb-1">Wuying records the whole session and shows the person a notice. A short piece stays on the computer until they close the Wuying window. That close leaves the computer Running, and the video uploads to the Alibaba console. Keep it Running for a few minutes so the upload can finish. Stopping or shutting down ends the upload, and that video does not arrive. Open Recordings after the upload. The page reads the same videos as the console. Play watches the video here. Download saves the file. The video list has its own time range. On the work report, choose the start and end dates and click Show. Write the work report then reads only the recordings in that range and writes what each person did. The report stays after the video is deleted. Videos are kept for about 15 days.</p>
+            <p class="mb-1">Wuying records the whole session and shows the person a notice. A short piece stays on the computer until they close the Wuying window. That close leaves the computer Running, and the video uploads to the Alibaba console. Keep it Running for a few minutes so the upload can finish. Stopping or shutting down ends the upload, and that video does not arrive. Open Recordings after the upload. Play watches the video here. Download saves the file. Videos are kept for about 15 days.</p>
             <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:recording_list' %}"><i class="bi bi-camera-video" aria-hidden="true"></i> Open recordings</a>
+        </li>
+        <li class="mb-0">
+            <strong>Open Report to read what people did on their computers.</strong>
+            <p class="mb-1">Report opens on the last 7 days and shows the AI analysis that is already written. Choose another From and To date, then Show, when you need a different range. Write the work report reads only the recordings in that range and writes what each person did. Download report saves that written report as a text file. The written report stays after the video is deleted.</p>
+            <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:report_list' %}"><i class="bi bi-file-earmark-text" aria-hidden="true"></i> Open report</a>
         </li>
     </ol>
 </div>

@@ -49,6 +49,7 @@ from view_api.views import (
     refresh_desktop,
     mark_desktop_released,
     describe_signin_events,
+    describe_usage_events,
     describe_policy,
     describe_policy_groups,
     fetch_desktop,
@@ -364,14 +365,9 @@ def desktop_life(logs, vm, now):
         if exist_start is None:
             exist_start = vm.created
         exist_end = now
-        if opened is not None:
-            running.append((opened, now))
-        elif vm.status in ("Running", "Starting"):
-            boot = exist_start
-            if vm.last_start_time and exist_start and vm.last_start_time >= exist_start:
-                boot = vm.last_start_time
-            if boot and (not running or boot >= running[-1][1]) and boot < now:
-                running.append((boot, now))
+        # An open Start without Stop is not billed until now here.
+        # usage_windows closes it from visits and start events, or until
+        # now only while the computer is still Running.
     return {
         "name": name or "Untitled",
         "region": region,
@@ -387,6 +383,20 @@ def desktop_life(logs, vm, now):
 # Shorter gaps stay on the full hourly price, because the computer was
 # still running between those visits.
 RUNNING_GAP = timedelta(hours=3)
+
+
+def merge_intervals(intervals):
+    ordered = sorted((start, end) for start, end in intervals if end > start)
+    if not ordered:
+        return []
+    merged = [ordered[0]]
+    for start, end in ordered[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def visit_windows(exist_start, exist_end, pairs):
@@ -416,20 +426,62 @@ def visit_windows(exist_start, exist_end, pairs):
     return windows
 
 
-def usage_windows(life, pairs, now):
-    if life["running"]:
-        return life["running"]
+def activity_windows(exist_start, exist_end, starts, pairs, open_to=None):
+    """Cluster starts and connect sessions. Gaps longer than RUNNING_GAP end a run."""
+    points = []
+    for when in starts or []:
+        if when and exist_start <= when <= exist_end:
+            points.append((when, "start"))
+    for connect, disconnect in sorted(pairs or []):
+        connect = max(connect, exist_start)
+        disconnect = min(disconnect, exist_end)
+        if disconnect <= connect:
+            continue
+        points.append((connect, "connect"))
+        points.append((disconnect, "disconnect"))
+    points.sort()
+    windows = []
+    cluster_start = None
+    cluster_end = None
+    for when, _kind in points:
+        if cluster_end is None:
+            cluster_start = exist_start if when - exist_start <= RUNNING_GAP else when
+            cluster_end = when
+            continue
+        if when - cluster_end <= RUNNING_GAP:
+            cluster_end = max(cluster_end, when)
+            continue
+        windows.append((cluster_start, cluster_end))
+        cluster_start = when
+        cluster_end = when
+    if cluster_end is not None:
+        end_at = cluster_end
+        if open_to is not None and open_to >= cluster_start:
+            end_at = max(end_at, open_to)
+        windows.append((cluster_start, end_at))
+    elif open_to is not None and exist_start <= open_to <= exist_end:
+        boot = open_to
+        windows.append((boot, open_to))
+    return windows
+
+
+def usage_windows(life, pairs, now, starts=None):
     start = life["exist_start"]
     if not start:
         return []
     end = life["exist_end"] or now
     vm = life["vm"]
+    trusted = list(life["running"] or [])
+    open_to = None
+    seed = list(starts or [])
     if vm is not None and vm.status in ("Running", "Starting"):
+        open_to = now
         boot = start
         if vm.last_start_time and vm.last_start_time >= start:
             boot = vm.last_start_time
-        return [(boot, now)]
-    return visit_windows(start, end, pairs or [])
+        seed.append(boot)
+    activity = activity_windows(start, end, seed, pairs or [], open_to=open_to)
+    return merge_intervals(trusted + activity)
 
 
 def cost_chart(points):
@@ -524,16 +576,27 @@ def desktop_cost_report():
 
     visits = {}
     open_visit = {}
+    starts = {}
     try:
         timed = []
-        for event in describe_signin_events(month_start, now):
+        for event in describe_usage_events(month_start, now):
             kind = event.get("EventType")
             desktop_id = event.get("DesktopId") or ""
             when = parse_alibaba_time(event.get("EventTime"))
-            if kind not in ("DESKTOP_CONNECT", "DESKTOP_DISCONNECT") or not desktop_id or not when:
+            if kind not in (
+                "DESKTOP_CONNECT",
+                "DESKTOP_DISCONNECT",
+                "DESKTOP_START",
+                "DESKTOP_STOP",
+            ) or not desktop_id or not when:
                 continue
             timed.append((when, kind, desktop_id))
         for when, kind, desktop_id in sorted(timed):
+            if kind == "DESKTOP_START":
+                starts.setdefault(desktop_id, []).append(when)
+                continue
+            if kind == "DESKTOP_STOP":
+                continue
             if kind == "DESKTOP_CONNECT":
                 open_visit[desktop_id] = when
                 continue
@@ -542,6 +605,7 @@ def desktop_cost_report():
                 visits.setdefault(desktop_id, []).append((started, when))
     except AlibabaApiError:
         visits = {}
+        starts = {}
 
     daily = {}
     rows = []
@@ -549,7 +613,13 @@ def desktop_cost_report():
     remaining = 0
     for cloud_id, logs in grouped.items():
         life = desktop_life(logs, current.get(cloud_id), now)
-        life["running"] = usage_windows(life, visits.get(cloud_id), now)
+        log_starts = [log.created for log in logs if log.action in ("Start", "Restart")]
+        life["running"] = usage_windows(
+            life,
+            visits.get(cloud_id),
+            now,
+            starts=(starts.get(cloud_id) or []) + log_starts,
+        )
         if not life["exist_start"] or not life["exist_end"]:
             continue
         # A computer released inside the hour it was created does not
@@ -1920,13 +1990,8 @@ class RecordingListView(GroupRequiredMixin, DashboardMixin, TemplateView):
         days = self.request.GET.get("days", "7")
         if days not in ("7", "30"):
             days = "7"
-        selected_range, range_error = parse_date_range(
-            self.request.GET.get("from"),
-            self.request.GET.get("to"),
-        )
         selected_user = (self.request.GET.get("user") or "").strip()
         selected_desktop = (self.request.GET.get("desktop") or "").strip()
-        report_user = (self.request.GET.get("report_user") or "").strip()
         profiles = list(
             Profile.objects.exclude(eds_end_user_id__isnull=True)
             .exclude(eds_end_user_id="")
@@ -1938,27 +2003,15 @@ class RecordingListView(GroupRequiredMixin, DashboardMixin, TemplateView):
         known_desktops = {desktop.vm_id for desktop in desktops}
         if selected_user and selected_user not in known_ids:
             selected_user = ""
-        if report_user and report_user not in known_ids:
-            report_user = ""
         if selected_desktop and selected_desktop not in known_desktops:
             selected_desktop = ""
         context["days"] = days
-        context["date_from"] = selected_range[2] if selected_range else (self.request.GET.get("from") or "")
-        context["date_to"] = selected_range[3] if selected_range else (self.request.GET.get("to") or "")
-        context["range_start"] = selected_range[0] if selected_range else None
-        context["range_end"] = selected_range[1] if selected_range else None
-        context["range_ready"] = selected_range is not None
-        context["range_error"] = range_error
         context["selected_user"] = selected_user
         context["selected_desktop"] = selected_desktop
-        context["report_user"] = report_user
         context["wuying_users"] = profiles
         context["desktops"] = desktops
         context["recording_error"] = ""
         context["recordings"] = []
-        context["work_notes"] = []
-        context["summaries_waiting"] = 0
-        context["report_error"] = ""
 
         end = timezone.now()
         start = end - timedelta(days=int(days))
@@ -2003,6 +2056,45 @@ class RecordingListView(GroupRequiredMixin, DashboardMixin, TemplateView):
             })
         rows.sort(key=lambda row: row["started"] or start, reverse=True)
         context["recordings"] = rows
+        return context
+
+
+class ReportListView(GroupRequiredMixin, DashboardMixin, TemplateView):
+    group_required = ['superadmin']
+    template_name = "view_dashboards/_group_dashboard/superadmin/report_list.html"
+
+    def get_context_data(self, **kwargs):
+        context = super(ReportListView, self).get_context_data(**kwargs)
+        context["page_title"] = "Report"
+        context["main_nav"] = "report"
+        today = localtime(timezone.now()).date()
+        raw_from = (self.request.GET.get("from") or "").strip()
+        raw_to = (self.request.GET.get("to") or "").strip()
+        if not raw_from and not raw_to:
+            raw_from = (today - timedelta(days=6)).isoformat()
+            raw_to = today.isoformat()
+        selected_range, range_error = parse_date_range(raw_from, raw_to)
+        report_user = (self.request.GET.get("report_user") or "").strip()
+        profiles = list(
+            Profile.objects.exclude(eds_end_user_id__isnull=True)
+            .exclude(eds_end_user_id="")
+            .select_related("user")
+            .order_by("eds_end_user_id")
+        )
+        known_ids = {profile.eds_end_user_id for profile in profiles}
+        if report_user and report_user not in known_ids:
+            report_user = ""
+        context["date_from"] = selected_range[2] if selected_range else raw_from
+        context["date_to"] = selected_range[3] if selected_range else raw_to
+        context["range_start"] = selected_range[0] if selected_range else None
+        context["range_end"] = selected_range[1] if selected_range else None
+        context["range_ready"] = selected_range is not None
+        context["range_error"] = range_error
+        context["report_user"] = report_user
+        context["wuying_users"] = profiles
+        context["work_notes"] = []
+        context["summaries_waiting"] = 0
+        context["report_error"] = ""
         if selected_range is not None:
             try:
                 report_rows = recording_rows(selected_range[0], selected_range[1], report_user)
@@ -2014,7 +2106,7 @@ class RecordingListView(GroupRequiredMixin, DashboardMixin, TemplateView):
         return context
 
 
-class RecordingSummarizeView(GroupRequiredMixin, DashboardMixin, View):
+class ReportSummarizeView(GroupRequiredMixin, DashboardMixin, View):
     group_required = ['superadmin']
 
     def post(self, request, *args, **kwargs):
@@ -2025,6 +2117,72 @@ class RecordingSummarizeView(GroupRequiredMixin, DashboardMixin, View):
         payload = summarize_next(selected_range[0], selected_range[1], report_user, "")
         status = 200 if payload.get("ok") else 502
         return JsonResponse(payload, status=status)
+
+
+def format_work_report_download(notes, range_start, range_end, report_user=""):
+    lines = [
+        "Work report",
+        "From: {}".format(localtime(range_start).strftime("%d/%m/%Y")),
+        "To: {}".format(localtime(range_end).strftime("%d/%m/%Y")),
+    ]
+    if report_user:
+        lines.append("User: {}".format(report_user))
+    lines.append("")
+    if not notes:
+        lines.append("No report in this date range.")
+        return "\n".join(lines)
+    for note in notes:
+        day = note["day"].strftime("%d/%m/%Y") if note.get("day") else "-"
+        lines.append("{} · {}".format(note.get("person") or "Unknown person", day))
+        if note.get("report"):
+            lines.append(note["report"])
+        detail_lines = note.get("lines") or []
+        if detail_lines:
+            for line in detail_lines:
+                start_at = line.get("at") or ""
+                until = line.get("until") or start_at
+                span = start_at if until == start_at else "{}-{}".format(start_at, until)
+                lines.append("  - {} · {}".format(span, line.get("text") or "Screen is idle"))
+        else:
+            lines.append("  - No picture in this recording.")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+class ReportDownloadView(GroupRequiredMixin, DashboardMixin, View):
+    group_required = ['superadmin']
+
+    def get(self, request, *args, **kwargs):
+        selected_range, range_error = parse_date_range(request.GET.get("from"), request.GET.get("to"))
+        if selected_range is None:
+            messages.error(request, range_error or "Choose a start date and an end date first.")
+            return HttpResponseRedirect(reverse("view_dashboards:report_list"))
+        report_user = (request.GET.get("report_user") or "").strip()
+        profiles = Profile.objects.exclude(eds_end_user_id__isnull=True).exclude(eds_end_user_id="")
+        known_ids = set(profiles.values_list("eds_end_user_id", flat=True))
+        if report_user and report_user not in known_ids:
+            report_user = ""
+        try:
+            notes = work_notes(recording_rows(selected_range[0], selected_range[1], report_user))
+        except AlibabaApiError as exc:
+            messages.error(request, str(exc))
+            return HttpResponseRedirect(
+                "{}?from={}&to={}&report_user={}".format(
+                    reverse("view_dashboards:report_list"),
+                    selected_range[2],
+                    selected_range[3],
+                    report_user,
+                )
+            )
+        body = format_work_report_download(notes, selected_range[0], selected_range[1], report_user)
+        filename = "work-report-{}-to-{}.txt".format(selected_range[2], selected_range[3])
+        response = HttpResponse(body.encode("utf-8-sig"), content_type="text/plain; charset=utf-8")
+        response["Content-Disposition"] = 'attachment; filename="{}"'.format(filename)
+        return response
+
+
+# Old recordings summarize URL kept so an open Recordings tab still works.
+RecordingSummarizeView = ReportSummarizeView
 
 
 RECORDING_PATH = re.compile(r"^[A-Za-z0-9_./+-]+\.mp4$")

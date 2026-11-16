@@ -1396,7 +1396,12 @@ def parse_alibaba_time(value):
 def describe_signin_events(start, end, end_user_id=""):
     events = []
     seen = set()
-    for event in each_region(lambda region_id: _describe_signin_events(start, end, end_user_id)):
+    for event in each_region(lambda region_id: _describe_client_events(
+        start,
+        end,
+        end_user_id,
+        ("CLIENT_LOGIN", "DESKTOP_CONNECT", "DESKTOP_DISCONNECT"),
+    )):
         key = event.get("EventId") or (
             event.get("EventType"), event.get("EventTime"), event.get("EndUserId"), event.get("DesktopId"),
         )
@@ -1408,21 +1413,41 @@ def describe_signin_events(start, end, end_user_id=""):
     return events
 
 
-def _describe_signin_events(start, end, end_user_id=""):
+def describe_usage_events(start, end):
+    """Connect, disconnect, start, and stop events used by the payment estimate."""
+    events = []
+    seen = set()
+    for event in each_region(lambda region_id: _describe_client_events(
+        start,
+        end,
+        "",
+        ("DESKTOP_CONNECT", "DESKTOP_DISCONNECT", "DESKTOP_START", "DESKTOP_STOP"),
+    )):
+        key = event.get("EventId") or (
+            event.get("EventType"), event.get("EventTime"), event.get("EndUserId"), event.get("DesktopId"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        events.append(event)
+    events.sort(key=lambda event: event.get("EventTime") or "")
+    return events
+
+
+def _describe_client_events(start, end, end_user_id, event_types):
     extra = {
         "StartTime": start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "EndTime": end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "MaxResults": 100,
-        "EventTypes.1": "CLIENT_LOGIN",
-        "EventTypes.2": "DESKTOP_CONNECT",
-        "EventTypes.3": "DESKTOP_DISCONNECT",
     }
+    for index, event_type in enumerate(event_types, start=1):
+        extra["EventTypes.{}".format(index)] = event_type
     if end_user_id:
         extra["EndUserId"] = end_user_id
 
     events = []
     next_token = ""
-    for _ in range(5):
+    for _ in range(10):
         params = dict(extra)
         if next_token:
             params["NextToken"] = next_token

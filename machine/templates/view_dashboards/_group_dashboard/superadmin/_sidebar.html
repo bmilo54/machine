@@ -50,6 +50,12 @@
             </a>
         </li>
         <li class="sidebar-menu-item">
+            <a href="{% url 'view_dashboards:report_list' %}" class="sidebar-menu-link {% if main_nav == 'report' %}active{% endif %}" title="Report">
+                <i class="bi bi-file-earmark-text"></i>
+                <span>Report</span>
+            </a>
+        </li>
+        <li class="sidebar-menu-item">
             <a href="{% url 'view_dashboards:activity_list' %}" class="sidebar-menu-link {% if main_nav == 'activity' %}active{% endif %}" title="Activity">
                 <i class="bi bi-clock-history"></i>
                 <span>Activity</span>
