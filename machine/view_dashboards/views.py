@@ -23,6 +23,7 @@ from django.contrib import messages
 from django.core.exceptions import PermissionDenied
 from django.db.models import Count, Q
 from django.conf import settings
+from django.core.cache import cache
 from django.contrib.auth import login, logout, authenticate
 from django.contrib.auth.models import User
 
@@ -197,7 +198,7 @@ class DashboardPageView(DashboardMixin, TemplateView):
             error=Count("id", filter=Q(status="Error")),
         )
         context['recent_logs'] = ActivityLog.objects.select_related("actor", "virtual_machine").order_by("-created")[:8]
-        context['cost'] = desktop_cost_report()
+        context['cost'] = cached_desktop_cost_report()
         return context
 
     def get_template_names(self):
@@ -207,6 +208,35 @@ class DashboardPageView(DashboardMixin, TemplateView):
         return super(DashboardPageView, self).get_template_names()
 
 
+DESKTOP_SYNC_CACHE = "ecd-desktops-synced"
+DESKTOP_SYNC_SECONDS = 120
+COST_REPORT_CACHE = "dashboard-cost-report"
+COST_REPORT_SECONDS = 300
+
+
+def sync_desktops_if_stale(force=False):
+    """Pull desktop status from Alibaba. Still automatic, but not on every click."""
+    if not force and cache.get(DESKTOP_SYNC_CACHE):
+        return
+    for desktop in describe_desktops():
+        apply_desktop(desktop)
+    cache.set(DESKTOP_SYNC_CACHE, "1", DESKTOP_SYNC_SECONDS)
+
+
+def clear_desktop_speed_caches():
+    cache.delete(DESKTOP_SYNC_CACHE)
+    cache.delete(COST_REPORT_CACHE)
+
+
+def cached_desktop_cost_report():
+    cached = cache.get(COST_REPORT_CACHE)
+    if cached is not None:
+        return cached
+    report = desktop_cost_report()
+    cache.set(COST_REPORT_CACHE, report, COST_REPORT_SECONDS)
+    return report
+
+
 def ensure_desktop_types():
     missing = VirtualMachine.objects.filter(vm_id__gt="").filter(
         Q(desktop_type="") | Q(desktop_type__isnull=True)
@@ -214,8 +244,7 @@ def ensure_desktop_types():
     if not missing.exists():
         return
     try:
-        for desktop in describe_desktops():
-            apply_desktop(desktop)
+        sync_desktops_if_stale(force=True)
     except AlibabaApiError:
         return
 
@@ -711,17 +740,42 @@ def region_names():
 
 def network_banner(networks):
     """The first office network whose bandwidth plan is still updating, for the progress bar."""
+    cache_key = "network-banner:v1"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        if not cached:
+            return None
+        network = next((item for item in networks if item.pk == cached.get("network_id")), None)
+        if network is None:
+            cache.delete(cache_key)
+        else:
+            return {
+                "network": network,
+                "status": cached.get("status") or "Updating",
+                "label": cached.get("label") or "",
+            }
     for network in networks:
         try:
             state = bandwidth_state(network)
         except AlibabaApiError:
             continue
         if state.get("updating"):
-            return {
+            banner = {
                 "network": network,
                 "status": state.get("status") or "Updating",
                 "label": state.get("label") or "",
             }
+            cache.set(
+                cache_key,
+                {
+                    "network_id": network.pk,
+                    "status": banner["status"],
+                    "label": banner["label"],
+                },
+                DESKTOP_SYNC_SECONDS,
+            )
+            return banner
+    cache.set(cache_key, {}, DESKTOP_SYNC_SECONDS)
     return None
 
 
@@ -737,8 +791,7 @@ class DesktopListView(GroupRequiredMixin, DashboardMixin, ListView):
 
     def get(self, request, *args, **kwargs):
         try:
-            for desktop in describe_desktops():
-                apply_desktop(desktop)
+            sync_desktops_if_stale()
         except AlibabaApiError:
             pass
         return super(DesktopListView, self).get(request, *args, **kwargs)
@@ -2320,6 +2373,8 @@ class DesktopSyncView(GroupRequiredMixin, DashboardMixin, View):
         for desktop in desktops:
             if apply_desktop(desktop):
                 saved += 1
+        cache.set(DESKTOP_SYNC_CACHE, "1", DESKTOP_SYNC_SECONDS)
+        cache.delete(COST_REPORT_CACHE)
         log_desktop(
             request, None, "Sync",
             details="Synced {} desktop(s) from Alibaba.".format(saved),
@@ -2377,6 +2432,7 @@ class DesktopDeleteView(GroupRequiredMixin, DashboardMixin, DeleteView):
             old_value=spec_summary(vm.desktop_type, vm.system_disk, vm.data_disk),
             details=details,
         )
+        clear_desktop_speed_caches()
         return super(DesktopDeleteView, self).form_valid(form)
 
 
@@ -2416,6 +2472,7 @@ class DesktopPowerView(GroupRequiredMixin, DashboardMixin, View):
             else:
                 messages.error(request, str(exc))
         else:
+            clear_desktop_speed_caches()
             messages.success(request, "{} requested.".format(spec[0]))
         return HttpResponseRedirect(detail_url)
 
