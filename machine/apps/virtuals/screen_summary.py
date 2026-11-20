@@ -129,9 +129,18 @@ def work_notes(rows):
 
 
 def summarize_next(start, end, end_user_id="", desktop_id=""):
+    return analyse_pending(start, end, end_user_id=end_user_id, desktop_id=desktop_id, limit=1)
+
+
+def analyse_pending(start, end, end_user_id="", desktop_id="", limit=1):
+    """Analyse unread recordings in a time range. Used by Report and the cron command."""
     if not gemini_key():
         return {"ok": False, "error": "The Gemini key is missing from local.py."}
-    if not cache.add(LOCK_KEY, "1", 300):
+    try:
+        limit = max(1, int(limit))
+    except (TypeError, ValueError):
+        limit = 1
+    if not cache.add(LOCK_KEY, "1", max(300, limit * 300)):
         return {"ok": False, "error": "A summary is already running."}
     try:
         rows = recording_rows(start, end, end_user_id, desktop_id)
@@ -143,14 +152,32 @@ def summarize_next(start, end, end_user_id="", desktop_id=""):
         )
         waiting = [row for row in rows if row["file_path"] not in done]
         if not waiting:
-            return {"ok": True, "remaining": 0, "done": True}
-        error = _summarize_one(waiting[0])
-        remaining = len(waiting) - (0 if error else 1)
-        if error:
-            return {"ok": False, "error": error, "remaining": remaining}
-        return {"ok": True, "remaining": remaining, "done": remaining == 0}
+            return {"ok": True, "remaining": 0, "done": True, "processed": 0}
+        processed = 0
+        last_error = ""
+        for row in waiting[:limit]:
+            error = _summarize_one(row)
+            if error:
+                last_error = error
+                break
+            processed += 1
+        remaining = max(0, len(waiting) - processed)
+        if last_error:
+            return {
+                "ok": False,
+                "error": last_error,
+                "remaining": remaining,
+                "done": remaining == 0,
+                "processed": processed,
+            }
+        return {
+            "ok": True,
+            "remaining": remaining,
+            "done": remaining == 0,
+            "processed": processed,
+        }
     except AlibabaApiError as exc:
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": str(exc), "processed": 0}
     finally:
         cache.delete(LOCK_KEY)
 
