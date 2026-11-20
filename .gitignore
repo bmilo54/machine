@@ -55,6 +55,9 @@ cover/
 
 local.py*
 
+# Local deploy notes (keep on your PC only)
+DEPLOY_ALIBABA_SERVER.txt
+
 # Translations
 *.mo
 *.pot

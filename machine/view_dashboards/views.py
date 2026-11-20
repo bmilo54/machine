@@ -381,9 +381,10 @@ def desktop_life(logs, vm, now):
                 # closes that first run at the click, not at the last visit.
                 running.append((exist_start, log.created))
         elif log.action == "Delete" and exist_end is None:
-            if opened is not None:
-                running.append((opened, log.created))
-                opened = None
+            # Do not treat Start→Delete as one long running bill. Stop often
+            # happens outside the dashboard, so visits/start events decide
+            # the on hours; the rest until Delete is disk only.
+            opened = None
             exist_end = log.created
     if vm is not None and vm.region:
         region = vm.region
@@ -909,9 +910,9 @@ class DesktopCreateView(GroupRequiredMixin, DashboardFormMixin, CreateView):
 
     def get_context_data(self, **kwargs):
         context = super(DesktopCreateView, self).get_context_data(**kwargs)
-        context['page_title'] = 'Create cloud computer'
+        context['page_title'] = 'Create virtual machine'
         context['main_nav'] = 'desktops'
-        context['submit_label'] = 'Create cloud computer'
+        context['submit_label'] = 'Create virtual machine'
         context['page_subtitle'] = (
             'Purchases a Windows 11 Pro computer in the office network you pick, with that region\'s recording policy. '
             'Alibaba bills it pay-as-you-go.'

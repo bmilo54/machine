@@ -4,7 +4,7 @@
 <div class="page-header">
     <div>
         <h1 class="page-title">Guidance</h1>
-        <p class="page-subtitle">Create a cloud computer, then give it to one user.</p>
+        <p class="page-subtitle">Create a virtual machine, then give it to one user.</p>
     </div>
 </div>
 
@@ -33,7 +33,7 @@
         <li class="mb-4">
             <strong>Buy the computer.</strong>
             <p class="mb-1">Pick the office network first. The user field can stay empty. Alibaba creates a Windows 11 Pro computer in that office network and bills it pay-as-you-go. New computers use the region's recording policy and its shared website list. Choose Websites on the computer when it needs its own list. The status stays Creating until the computer is ready.</p>
-            <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:desktop_create' %}"><i class="bi bi-display" aria-hidden="true"></i> Create a cloud computer</a>
+            <a class="btn-table-action guidance-step" href="{% url 'view_dashboards:desktop_create' %}"><i class="bi bi-display" aria-hidden="true"></i> Create a virtual machine</a>
         </li>
         <li class="mb-4">
             <strong>Wait until the status is Running.</strong>
@@ -111,7 +111,7 @@ document.querySelectorAll("[data-copy-signin]").forEach(function (button) {
     button.addEventListener("click", function () {
         var read = function (id) { return JSON.parse(document.getElementById(id).textContent); };
         var lines = [
-            "Your cloud desktop is ready.",
+            "Your virtual machine is ready.",
             "1. Download the Wuying app: " + read("wuying-download-url"),
             "   Or open it in a browser: " + read("wuying-web-url"),
             "2. Choose 企业版 & 商业版 (Enterprise).",
